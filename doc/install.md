@@ -25,7 +25,7 @@ $ ./target/release/electrs --version  # should print the latest version
 Note for Raspberry Pi 4 owners: the old versions of OS/toolchains produce broken binaries.
 Make sure to use latest OS! (see #226)
 
-Install [recent Rust](https://rustup.rs/) (1.48.0+, `apt install cargo` is preferred for Debian 11),
+Install [recent Rust](https://rustup.rs/) (1.63.0+, `apt install cargo` is preferred for Debian 12),
 [latest Bitcoin Core](https://bitcoincore.org/en/download/) (0.21+)
 and [latest Electrum wallet](https://electrum.org/#download) (4.0+).
 
