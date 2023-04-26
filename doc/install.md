@@ -52,18 +52,18 @@ The advantages of dynamic linking:
 * Cross compilation is more reliable
 * If another application is also using `rocksdb`, you don't store it on disk and in RAM twice
 
-If you decided to use dynamic linking, you will also need to install the library ([6.11.4 release](https://github.com/facebook/rocksdb/releases/tag/v6.11.4) is required).
-On [Debian 11 (bullseye)](https://packages.debian.org/bullseye/librocksdb-dev) and [Ubuntu 21.04 (hirsute)](https://packages.ubuntu.com/hirsute/librocksdb-dev):
+If you decided to use dynamic linking, you will also need to install the library ([7.8.3 release](https://github.com/facebook/rocksdb/releases/tag/v7.8.3) is required).
+On [Debian 12 (bookworm)](https://packages.debian.org/bookworm/librocksdb-dev) and [Ubuntu 23.04 (lunar)](https://packages.ubuntu.com/lunar/librocksdb-dev):
 
 ```bash
-$ sudo apt install librocksdb-dev=6.11.4-3
+$ sudo apt install librocksdb-dev=7.8.3-2
 ```
 
 For other versions of Debian or Ubuntu, you can build librocksdb and install inside `/usr/local` directory using following command.
 
 ```bash
 $ sudo apt install -y libgflags-dev libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev
-$ git clone -b v6.11.4 --depth 1 https://github.com/facebook/rocksdb && cd rocksdb
+$ git clone -b v7.8.3 --depth 1 https://github.com/facebook/rocksdb && cd rocksdb
 $ make shared_lib -j $(nproc) && sudo make install-shared
 $ cd .. && rm -r rocksdb
 ```
