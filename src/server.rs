@@ -6,7 +6,7 @@ use std::{
     collections::hash_map::HashMap,
     io::{BufRead, BufReader, Write},
     iter::once,
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream}, sync::{Arc, Mutex},
 };
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     electrum::{Client, Rpc},
     metrics::{self, Metrics},
     signals::ExitError,
-    thread::spawn,
+    thread::spawn, coin_tracker,
 };
 
 struct Peer {
@@ -83,15 +83,25 @@ fn serve() -> Result<()> {
         "step",
         metrics::default_duration_buckets(),
     );
-    let mut rpc = Rpc::new(&config, metrics)?;
+    let rpc = Arc::new(Mutex::new(Rpc::new(&config, metrics)?));
+    let rpc2 = rpc.clone();
 
-    let new_block_rx = rpc.new_block_notification();
+    let options = coin_tracker::Options {
+        dev: true,
+        static_files: "../coin_tracker/gui/dist".to_string(),
+        address: config.electrum_rpc_addr,
+    };
+
+    // spawn("coin_tracker", || coin_tracker::main(rpc2, options));
+
+    let new_block_rx = rpc.lock().unwrap().new_block_notification();
+
     let mut peers = HashMap::<usize, Peer>::new();
     loop {
         // initial sync and compaction may take a few hours
         while server_rx.is_empty() {
-            let done = duration.observe_duration("sync", || rpc.sync().context("sync failed"))?; // sync a batch of blocks
-            peers = duration.observe_duration("notify", || notify_peers(&rpc, peers)); // peers are disconnected on error
+            let done = duration.observe_duration("sync", || rpc.lock().unwrap().sync().context("sync failed"))?; // sync a batch of blocks
+            peers = duration.observe_duration("notify", || notify_peers(&rpc.lock().unwrap(), peers)); // peers are disconnected on error
             if !done {
                 continue; // more blocks to sync
             }
@@ -103,9 +113,9 @@ fn serve() -> Result<()> {
         duration.observe_duration("select", || -> Result<()> {
             select! {
                 // Handle signals for graceful shutdown
-                recv(rpc.signal().receiver()) -> result => {
+                recv(rpc.lock().unwrap().signal().receiver()) -> result => {
                     result.context("signal channel disconnected")?;
-                    rpc.signal().exit_flag().poll().context("RPC server interrupted")?;
+                    rpc.lock().unwrap().signal().exit_flag().poll().context("RPC server interrupted")?;
                 },
                 // Handle new blocks' notifications
                 recv(new_block_rx) -> result => match result {
@@ -121,7 +131,7 @@ fn serve() -> Result<()> {
                     let rest = server_rx.iter().take(server_rx.len());
                     let events: Vec<Event> = first.chain(rest).collect();
                     server_batch_size.observe("recv", events.len() as f64);
-                    duration.observe_duration("handle", || handle_events(&rpc, &mut peers, events));
+                    duration.observe_duration("handle", || handle_events(&rpc.lock().unwrap(), &mut peers, events));
                 },
                 default(config.wait_duration) => (), // sync and update
             };

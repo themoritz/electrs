@@ -10,6 +10,7 @@ extern crate serde_derive;
 extern crate configure_me;
 
 mod cache;
+mod coin_tracker;
 mod chain;
 mod config;
 mod daemon;

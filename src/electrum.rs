@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use bitcoin::{
     consensus::{deserialize, encode::serialize_hex},
     hashes::hex::FromHex,
-    BlockHash, Txid,
+    BlockHash, Txid, block,
 };
 use crossbeam_channel::Receiver;
 use rayon::prelude::*;
@@ -21,7 +21,7 @@ use crate::{
     signals::Signal,
     status::ScriptHashStatus,
     tracker::Tracker,
-    types::ScriptHash,
+    types::ScriptHash, coin_tracker::{self, Input},
 };
 
 const PROTOCOL_VERSION: &str = "1.4";
@@ -360,6 +360,32 @@ impl Rpc {
         let tx = deserialize(&tx_bytes).context("invalid transaction")?;
         let txid = self.daemon.broadcast(&tx)?;
         Ok(json!(txid))
+    }
+
+    pub fn coin_tracker_get_tx(&self, txid: Txid) -> Result<Option<coin_tracker::Transaction>> {
+        match self.tracker.lookup_transaction(&self.daemon, txid)? {
+            Some((blockhash, tx)) => {
+                let block_height = self.tracker.chain().get_block_height(&blockhash).unwrap();
+                let block_header = self.tracker.chain().get_block_header(block_height).unwrap();
+                let result = coin_tracker::Transaction {
+                    timestamp: block_header.time,
+                    block_height: block_height as u32,
+                    txid: txid.to_string(),
+                    inputs: tx.input.iter().map(|input| {
+                        Input {
+                            txid: input.previous_output.txid,
+                            vout: input.previous_output.vout,
+                            value: 0,
+                            address: String::default(),
+                            address_type: "?".to_string()
+                        }
+                    }).collect(),
+                    outputs: vec![]
+                };
+                Ok(Some(result))
+            }
+            None => Ok(None)
+        }
     }
 
     fn transaction_get(&self, args: &TxGetArgs) -> Result<Value> {
