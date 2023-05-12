@@ -1,5 +1,5 @@
 
-use std::{str::FromStr, path::Path, net::SocketAddr};
+use std::{str::FromStr, path::{Path, PathBuf}, net::SocketAddr};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
@@ -16,7 +16,7 @@ type GenericError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Options {
     pub dev: bool,
     pub address: SocketAddr,
-    pub static_files: String,
+    pub static_files: PathBuf,
 }
 
 pub fn main(server_tx: Sender<Event>, options: Options) -> Result<()> {

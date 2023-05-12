@@ -133,6 +133,12 @@ type = "String"
 doc = "Logging filters, overriding `RUST_LOG` environment variable (see https://docs.rs/env_logger/ for details)"
 
 [[param]]
+name = "static_files"
+type = "std::path::PathBuf"
+doc = "Data directory of static files to serve"
+optional = false
+
+[[param]]
 name = "signet_magic"
 type = "String"
 doc = "network magic for custom signet network in hex format, as found in Bitcoin Core logs (signet only)"

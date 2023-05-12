@@ -143,6 +143,7 @@ pub struct Config {
     pub disable_electrum_rpc: bool,
     pub server_banner: String,
     pub signet_magic: Magic,
+    pub static_files: PathBuf,
     pub args: Vec<String>,
 }
 
@@ -349,6 +350,7 @@ impl Config {
             disable_electrum_rpc: config.disable_electrum_rpc,
             server_banner: config.server_banner,
             signet_magic: magic,
+            static_files: config.static_files,
             args: args.map(|a| a.into_string().unwrap()).collect(),
         };
         eprintln!(
