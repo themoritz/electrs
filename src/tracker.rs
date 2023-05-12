@@ -114,4 +114,26 @@ impl Tracker {
         })?;
         Ok(result)
     }
+
+    pub(crate) fn lookup_spending(
+        &self,
+        daemon: &Daemon,
+        outpoint: bitcoin::OutPoint,
+    ) -> Result<Option<(BlockHash, Transaction)>> {
+        // Note: there are two blocks with coinbase transactions having same txid (see BIP-30)
+        let blockhashes = self.index.filter_by_spending(outpoint);
+        let mut result = None;
+        daemon.for_blocks(blockhashes, |blockhash, block| {
+            for tx in block.txdata {
+                if result.is_some() {
+                    return;
+                }
+                if tx.input.iter().any(|txin| txin.previous_output == outpoint) {
+                    result = Some((blockhash, tx));
+                    return;
+                }
+            }
+        })?;
+        Ok(result)
+    }
 }

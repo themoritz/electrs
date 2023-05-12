@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use bitcoin::{
     consensus::{deserialize, encode::serialize_hex},
     hashes::hex::FromHex,
-    BlockHash, Txid, block,
+    BlockHash, Txid, Address,
 };
 use crossbeam_channel::Receiver;
 use rayon::prelude::*;
@@ -21,7 +21,7 @@ use crate::{
     signals::Signal,
     status::ScriptHashStatus,
     tracker::Tracker,
-    types::ScriptHash, coin_tracker::{self, Input},
+    types::ScriptHash, coin_tracker,
 };
 
 const PROTOCOL_VERSION: &str = "1.4";
@@ -365,22 +365,46 @@ impl Rpc {
     pub fn coin_tracker_get_tx(&self, txid: Txid) -> Result<Option<coin_tracker::Transaction>> {
         match self.tracker.lookup_transaction(&self.daemon, txid)? {
             Some((blockhash, tx)) => {
+                log::trace!("{:#?}", tx);
                 let block_height = self.tracker.chain().get_block_height(&blockhash).unwrap();
                 let block_header = self.tracker.chain().get_block_header(block_height).unwrap();
                 let result = coin_tracker::Transaction {
                     timestamp: block_header.time,
                     block_height: block_height as u32,
                     txid: txid.to_string(),
-                    inputs: tx.input.iter().map(|input| {
-                        Input {
+                    inputs: tx.input.iter().filter(|input| {
+                        // Don't include coinbase inputs
+                        !input.previous_output.is_null()
+                    }).map(|input| {
+                        let (_, prev_tx) = self.tracker.lookup_transaction(&self.daemon, input.previous_output.txid)?.unwrap();
+                        let output = &prev_tx.output[input.previous_output.vout as usize];
+                        let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
+                        Ok(coin_tracker::Input {
                             txid: input.previous_output.txid,
                             vout: input.previous_output.vout,
-                            value: 0,
-                            address: String::default(),
-                            address_type: "?".to_string()
-                        }
-                    }).collect(),
-                    outputs: vec![]
+                            value: output.value,
+                            address: address
+                                .clone()
+                                .map_or("????".to_string(), |a| a.to_string()),
+                            address_type: address.map_or("unknown".to_string(), |a| {
+                                a.address_type().map_or("?".to_string(), |t| t.to_string())
+                            }),
+                        })
+                    }).collect::<Result<Vec<_>>>()?,
+                    outputs: tx.output.iter().enumerate().map(|(o, output)| {
+                        let spending_txid = self.tracker.lookup_spending(&self.daemon, bitcoin::OutPoint { txid, vout: o as u32 })?.map(|(_blockhash, tx)| tx.txid());
+                        let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
+                        Ok(coin_tracker::Output {
+                            spending_txid,
+                            value: output.value,
+                            address: address
+                                .clone()
+                                .map_or("????".to_string(), |a| a.to_string()),
+                            address_type: address.map_or("unknown".to_string(), |a| {
+                                a.address_type().map_or("?".to_string(), |t| t.to_string())
+                            }),
+                        })
+                    }).collect::<Result<Vec<_>>>()?,
                 };
                 Ok(Some(result))
             }

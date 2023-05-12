@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bitcoin::Txid;
 use crossbeam_channel::{select, unbounded, Sender};
 use rayon::prelude::*;
 
@@ -6,7 +7,7 @@ use std::{
     collections::hash_map::HashMap,
     io::{BufRead, BufReader, Write},
     iter::once,
-    net::{Shutdown, TcpListener, TcpStream}, sync::{Arc, Mutex},
+    net::{Shutdown, TcpListener, TcpStream},
 };
 
 use crate::{
@@ -66,6 +67,7 @@ fn serve() -> Result<()> {
 
     let (server_tx, server_rx) = unbounded();
     if !config.disable_electrum_rpc {
+        let server_tx = server_tx.clone();
         let listener = TcpListener::bind(config.electrum_rpc_addr)?;
         info!("serving Electrum RPC on {}", listener.local_addr()?);
         spawn("accept_loop", || accept_loop(listener, server_tx)); // detach accepting thread
@@ -83,8 +85,7 @@ fn serve() -> Result<()> {
         "step",
         metrics::default_duration_buckets(),
     );
-    let rpc = Arc::new(Mutex::new(Rpc::new(&config, metrics)?));
-    let rpc2 = rpc.clone();
+    let mut rpc = Rpc::new(&config, metrics)?;
 
     let options = coin_tracker::Options {
         dev: true,
@@ -92,16 +93,16 @@ fn serve() -> Result<()> {
         address: config.electrum_rpc_addr,
     };
 
-    // spawn("coin_tracker", || coin_tracker::main(rpc2, options));
+    spawn("coin_tracker", || coin_tracker::main(server_tx, options));
 
-    let new_block_rx = rpc.lock().unwrap().new_block_notification();
+    let new_block_rx = rpc.new_block_notification();
 
     let mut peers = HashMap::<usize, Peer>::new();
     loop {
         // initial sync and compaction may take a few hours
         while server_rx.is_empty() {
-            let done = duration.observe_duration("sync", || rpc.lock().unwrap().sync().context("sync failed"))?; // sync a batch of blocks
-            peers = duration.observe_duration("notify", || notify_peers(&rpc.lock().unwrap(), peers)); // peers are disconnected on error
+            let done = duration.observe_duration("sync", || rpc.sync().context("sync failed"))?; // sync a batch of blocks
+            peers = duration.observe_duration("notify", || notify_peers(&rpc, peers)); // peers are disconnected on error
             if !done {
                 continue; // more blocks to sync
             }
@@ -113,9 +114,9 @@ fn serve() -> Result<()> {
         duration.observe_duration("select", || -> Result<()> {
             select! {
                 // Handle signals for graceful shutdown
-                recv(rpc.lock().unwrap().signal().receiver()) -> result => {
+                recv(rpc.signal().receiver()) -> result => {
                     result.context("signal channel disconnected")?;
-                    rpc.lock().unwrap().signal().exit_flag().poll().context("RPC server interrupted")?;
+                    rpc.signal().exit_flag().poll().context("RPC server interrupted")?;
                 },
                 // Handle new blocks' notifications
                 recv(new_block_rx) -> result => match result {
@@ -131,7 +132,7 @@ fn serve() -> Result<()> {
                     let rest = server_rx.iter().take(server_rx.len());
                     let events: Vec<Event> = first.chain(rest).collect();
                     server_batch_size.observe("recv", events.len() as f64);
-                    duration.observe_duration("handle", || handle_events(&rpc.lock().unwrap(), &mut peers, events));
+                    duration.observe_duration("handle", || handle_events(&rpc, &mut peers, events));
                 },
                 default(config.wait_duration) => (), // sync and update
             };
@@ -162,14 +163,24 @@ fn notify_peer(rpc: &Rpc, peer: &mut Peer) -> Result<()> {
         .context("failed to send notifications")
 }
 
-struct Event {
+pub struct Event {
     peer_id: usize,
     msg: Message,
+}
+
+impl Event {
+    pub fn get_tx(txid: Txid, callback: Sender<Result<Option<coin_tracker::Transaction>>>) -> Self {
+        Self {
+            peer_id: 0,
+            msg: Message::GetTx(txid, callback)
+        }
+    }
 }
 
 enum Message {
     New(TcpStream),
     Request(String),
+    GetTx(Txid, Sender<Result<Option<coin_tracker::Transaction>>>),
     Done,
 }
 
@@ -198,6 +209,9 @@ fn handle_peer_events(
                 peers.insert(peer_id, Peer::new(peer_id, stream));
             }
             Message::Request(line) => lines.push(line),
+            Message::GetTx(txid, callback) => {
+                callback.send(rpc.coin_tracker_get_tx(txid)).unwrap();
+            },
             Message::Done => {
                 done = true;
                 break;

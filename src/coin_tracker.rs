@@ -1,10 +1,11 @@
 
-use std::{str::FromStr, sync::{Arc, Mutex}, path::Path, net::SocketAddr};
+use std::{str::FromStr, path::Path, net::SocketAddr};
 
 use anyhow::Result;
+use crossbeam_channel::Sender;
 use tokio::runtime::Runtime;
 
-use crate::electrum::Rpc;
+use crate::server::Event;
 use bitcoin::Txid;
 use hyper::{header, Body, Method, Request, Response, StatusCode, service::{service_fn, make_service_fn}, Server};
 use hyper_staticfile::Static;
@@ -18,17 +19,17 @@ pub struct Options {
     pub static_files: String,
 }
 
-pub fn main(rpc: Arc<Mutex<Rpc>>, options: Options) -> Result<()> {
+pub fn main(server_tx: Sender<Event>, options: Options) -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         let static_ = Static::new(Path::new(&options.static_files));
 
         let service = make_service_fn(move |_| {
-            let rpc = rpc.clone();
+            let server_tx = server_tx.clone();
             let static_ = static_.clone();
             async move {
                 Ok::<_, GenericError>(service_fn(move |req| {
-                    server(static_.to_owned(), rpc.to_owned(), options.dev, req)
+                    server(static_.to_owned(), server_tx.to_owned(), options.dev, req)
                 }))
             }
         });
@@ -45,7 +46,7 @@ pub fn main(rpc: Arc<Mutex<Rpc>>, options: Options) -> Result<()> {
 
 pub async fn server(
     static_: Static,
-    rpc: Arc<Mutex<Rpc>>,
+    server_tx: Sender<Event>,
     dev: bool,
     req: Request<Body>,
 ) -> Result<Response<Body>, std::io::Error> {
@@ -61,7 +62,9 @@ pub async fn server(
                 let path = req.uri().path();
                 match Txid::from_str(&path[4..]) {
                     Ok(txid) => {
-                        match rpc.lock().unwrap().coin_tracker_get_tx(txid) {
+                        let (sender, receiver) = crossbeam_channel::bounded(0);
+                        server_tx.send(Event::get_tx(txid, sender)).unwrap();
+                        match receiver.recv().unwrap() {
                             Ok(tx) => {
                                 let json = serde_json::to_string(&tx).unwrap();
                                 let response = builder
