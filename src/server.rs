@@ -96,7 +96,6 @@ fn serve() -> Result<()> {
     spawn("coin_tracker", || coin_tracker::main(server_tx, options));
 
     let new_block_rx = rpc.new_block_notification();
-
     let mut peers = HashMap::<usize, Peer>::new();
     loop {
         // initial sync and compaction may take a few hours
