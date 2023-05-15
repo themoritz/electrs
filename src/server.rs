@@ -89,7 +89,6 @@ fn serve() -> Result<()> {
 
     let options = coin_tracker::Options {
         dev: true,
-        static_files: config.static_files,
         address: config.electrum_rpc_addr,
     };
 

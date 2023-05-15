@@ -1,5 +1,5 @@
 
-use std::{str::FromStr, path::{Path, PathBuf}, net::SocketAddr};
+use std::{str::FromStr, net::SocketAddr};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
@@ -8,7 +8,6 @@ use tokio::runtime::Runtime;
 use crate::server::Event;
 use bitcoin::Txid;
 use hyper::{header, Body, Method, Request, Response, StatusCode, service::{service_fn, make_service_fn}, Server};
-use hyper_staticfile::Static;
 use serde::{Deserialize, Serialize};
 
 type GenericError = Box<dyn std::error::Error + Send + Sync>;
@@ -16,20 +15,16 @@ type GenericError = Box<dyn std::error::Error + Send + Sync>;
 pub struct Options {
     pub dev: bool,
     pub address: SocketAddr,
-    pub static_files: PathBuf,
 }
 
 pub fn main(server_tx: Sender<Event>, options: Options) -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
-        let static_ = Static::new(Path::new(&options.static_files));
-
         let service = make_service_fn(move |_| {
             let server_tx = server_tx.clone();
-            let static_ = static_.clone();
             async move {
                 Ok::<_, GenericError>(service_fn(move |req| {
-                    server(static_.to_owned(), server_tx.to_owned(), options.dev, req)
+                    server(server_tx.to_owned(), options.dev, req)
                 }))
             }
         });
@@ -45,7 +40,6 @@ pub fn main(server_tx: Sender<Event>, options: Options) -> Result<()> {
 }
 
 pub async fn server(
-    static_: Static,
     server_tx: Sender<Event>,
     dev: bool,
     req: Request<Body>,
@@ -101,7 +95,11 @@ pub async fn server(
             }
         }
     } else {
-        static_.serve(req).await
+        let response = builder
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("Path not found."))
+            .unwrap();
+        Ok(response)
     }
 }
 
