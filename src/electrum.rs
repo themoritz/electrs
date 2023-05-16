@@ -21,7 +21,7 @@ use crate::{
     signals::Signal,
     status::ScriptHashStatus,
     tracker::Tracker,
-    types::ScriptHash, coin_tracker,
+    types::ScriptHash, txgraph,
 };
 
 const PROTOCOL_VERSION: &str = "1.4";
@@ -362,13 +362,13 @@ impl Rpc {
         Ok(json!(txid))
     }
 
-    pub fn coin_tracker_get_tx(&self, txid: Txid) -> Result<Option<coin_tracker::Transaction>> {
+    pub fn txgraph_get_tx(&self, txid: Txid) -> Result<Option<txgraph::Transaction>> {
         match self.tracker.lookup_transaction(&self.daemon, txid)? {
             Some((blockhash, tx)) => {
                 log::trace!("{:#?}", tx);
                 let block_height = self.tracker.chain().get_block_height(&blockhash).unwrap();
                 let block_header = self.tracker.chain().get_block_header(block_height).unwrap();
-                let result = coin_tracker::Transaction {
+                let result = txgraph::Transaction {
                     timestamp: block_header.time,
                     block_height: block_height as u32,
                     txid: txid.to_string(),
@@ -379,7 +379,7 @@ impl Rpc {
                         let (_, prev_tx) = self.tracker.lookup_transaction(&self.daemon, input.previous_output.txid)?.unwrap();
                         let output = &prev_tx.output[input.previous_output.vout as usize];
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
-                        Ok(coin_tracker::Input {
+                        Ok(txgraph::Input {
                             txid: input.previous_output.txid,
                             vout: input.previous_output.vout,
                             value: output.value,
@@ -394,7 +394,7 @@ impl Rpc {
                     outputs: tx.output.iter().enumerate().map(|(o, output)| {
                         let spending_txid = self.tracker.lookup_spending(&self.daemon, bitcoin::OutPoint { txid, vout: o as u32 })?.map(|(_blockhash, tx)| tx.txid());
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
-                        Ok(coin_tracker::Output {
+                        Ok(txgraph::Output {
                             spending_txid,
                             value: output.value,
                             address: address

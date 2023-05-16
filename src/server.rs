@@ -15,7 +15,7 @@ use crate::{
     electrum::{Client, Rpc},
     metrics::{self, Metrics},
     signals::ExitError,
-    thread::spawn, coin_tracker,
+    thread::spawn, txgraph,
 };
 
 struct Peer {
@@ -87,12 +87,12 @@ fn serve() -> Result<()> {
     );
     let mut rpc = Rpc::new(&config, metrics)?;
 
-    let options = coin_tracker::Options {
+    let options = txgraph::Options {
         dev: true,
         address: config.electrum_rpc_addr,
     };
 
-    spawn("coin_tracker", || coin_tracker::main(server_tx, options));
+    spawn("txgraph", || txgraph::main(server_tx, options));
 
     let new_block_rx = rpc.new_block_notification();
     let mut peers = HashMap::<usize, Peer>::new();
@@ -167,7 +167,7 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn get_tx(txid: Txid, callback: Sender<Result<Option<coin_tracker::Transaction>>>) -> Self {
+    pub fn get_tx(txid: Txid, callback: Sender<Result<Option<txgraph::Transaction>>>) -> Self {
         Self {
             peer_id: 0,
             msg: Message::GetTx(txid, callback)
@@ -178,7 +178,7 @@ impl Event {
 enum Message {
     New(TcpStream),
     Request(String),
-    GetTx(Txid, Sender<Result<Option<coin_tracker::Transaction>>>),
+    GetTx(Txid, Sender<Result<Option<txgraph::Transaction>>>),
     Done,
 }
 
@@ -208,7 +208,7 @@ fn handle_peer_events(
             }
             Message::Request(line) => lines.push(line),
             Message::GetTx(txid, callback) => {
-                callback.send(rpc.coin_tracker_get_tx(txid)).unwrap();
+                callback.send(rpc.txgraph_get_tx(txid)).unwrap();
             },
             Message::Done => {
                 done = true;
