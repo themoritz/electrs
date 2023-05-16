@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::{collections::{hash_map::Entry, HashMap}, time::Instant};
 use std::iter::FromIterator;
 
 use crate::{
@@ -363,11 +363,10 @@ impl Rpc {
     }
 
     pub fn txgraph_get_tx(&self, txid: Txid) -> Result<Option<txgraph::Transaction>> {
-        match self.tracker.lookup_transaction(&self.daemon, txid)? {
-            Some((blockhash, tx)) => {
-                log::trace!("{:#?}", tx);
-                let block_height = self.tracker.chain().get_block_height(&blockhash).unwrap();
-                let block_header = self.tracker.chain().get_block_header(block_height).unwrap();
+        let start = Instant::now();
+        match self.daemon.get_transaction(&txid, None) {
+            Ok(tx) => {
+                let (block_height, block_header) = self.tracker.lookup_height_and_header(txid)?.unwrap();
                 let result = txgraph::Transaction {
                     timestamp: block_header.time,
                     block_height: block_height as u32,
@@ -376,7 +375,7 @@ impl Rpc {
                         // Don't include coinbase inputs
                         !input.previous_output.is_null()
                     }).map(|input| {
-                        let (_, prev_tx) = self.tracker.lookup_transaction(&self.daemon, input.previous_output.txid)?.unwrap();
+                        let prev_tx = self.daemon.get_transaction(&input.previous_output.txid, None)?;
                         let output = &prev_tx.output[input.previous_output.vout as usize];
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
                         Ok(txgraph::Input {
@@ -406,9 +405,13 @@ impl Rpc {
                         })
                     }).collect::<Result<Vec<_>>>()?,
                 };
+                log::info!("Txid {} done, took {}ms", txid, (Instant::now() - start).as_millis());
                 Ok(Some(result))
             }
-            None => Ok(None)
+            Err(e) => {
+                log::warn!("{}", e);
+                Ok(None)
+            }
         }
     }
 

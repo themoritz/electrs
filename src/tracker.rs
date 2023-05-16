@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bitcoin::{BlockHash, Transaction, Txid};
+use bitcoin::{BlockHash, Transaction, Txid, block::Header};
 
 use crate::{
     cache::Cache,
@@ -112,6 +112,19 @@ impl Tracker {
                 }
             }
         })?;
+        Ok(result)
+    }
+
+    pub(crate) fn lookup_height_and_header(
+        &self,
+        txid: Txid
+    ) -> Result<Option<(usize, Header)>> {
+        let mut blockhashes = self.index.filter_by_txid(txid);
+        let result = blockhashes.next().map(|blockhash| {
+            let height = self.chain().get_block_height(&blockhash).unwrap();
+            let header = self.chain().get_block_header(height).unwrap();
+            (height, header.clone())
+        });
         Ok(result)
     }
 
