@@ -123,7 +123,7 @@ impl Tracker {
         let result = blockhashes.next().map(|blockhash| {
             let height = self.chain().get_block_height(&blockhash).unwrap();
             let header = self.chain().get_block_header(height).unwrap();
-            (height, header.clone())
+            (height, *header)
         });
         Ok(result)
     }
