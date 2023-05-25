@@ -43,6 +43,34 @@ const HASH_PREFIX_LEN: usize = 8;
 type HashPrefix = [u8; HASH_PREFIX_LEN];
 type Height = u32;
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpendingTxidRow {
+    prefix: HashPrefix,
+    vout: u16,
+    txid: Txid
+}
+
+impl_consensus_encoding!(SpendingTxidRow, prefix, vout, txid);
+
+impl SpendingTxidRow {
+    pub fn new(txid: Txid, vout: usize, spending_txid: Txid) -> Self {
+        let prefix = <[u8; HASH_PREFIX_LEN]>::try_from(&txid[..HASH_PREFIX_LEN]).unwrap();
+        SpendingTxidRow { prefix, vout: vout as u16, txid: spending_txid }
+    }
+
+    pub fn to_db_row(&self) -> db::Row {
+        serialize(self).into_boxed_slice()
+    }
+
+    pub fn from_db_row(row: &[u8]) -> Self {
+        deserialize(row).expect("bad SpendingTxidRow")
+    }
+
+    pub fn txid(&self) -> Txid {
+        self.txid
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub(crate) struct HashPrefixRow {
     prefix: [u8; HASH_PREFIX_LEN],
@@ -177,7 +205,7 @@ impl HeaderRow {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{spending_prefix, HashPrefixRow, ScriptHash, ScriptHashRow, TxidRow};
+    use crate::types::{spending_prefix, SpendingTxidRow, HashPrefixRow, ScriptHash, ScriptHashRow, TxidRow};
     use bitcoin::{Address, OutPoint, Txid};
     use hex_lit::hex;
     use serde_json::{from_str, json};
@@ -215,6 +243,26 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn test_spendingtxid_row() {
+        let hex1 = "d5d27987d2a3dfc724e359870c6644b40e497bdc0589a033220fe15429d88599";
+        let txid1 = Txid::from_str(hex1).unwrap();
+
+        let hex2 = "e3bf3d07d4b0375638d5f1db5255fe07ba2c4cb067cd81b84ee974b6585fb468";
+        let txid2 = Txid::from_str(hex2).unwrap();
+
+        let row1 = SpendingTxidRow::new(txid1, 256, txid2);
+        let row2 = SpendingTxidRow::new(txid1, 2, txid2);
+
+        // LE, so reverse last 8 byes of txid1, 2 bytes for vout, reverse of txid2:
+        //                                                   |----|
+        assert_eq!(&*row1.to_db_row(), &hex!("9985d82954e10f22000168b45f58b674e94eb881cd67b04c2cba07fe5552dbf1d5385637b0d4073dbfe3"));
+        assert_eq!(&*row2.to_db_row(), &hex!("9985d82954e10f22020068b45f58b674e94eb881cd67b04c2cba07fe5552dbf1d5385637b0d4073dbfe3"));
+
+        assert_eq!(row1, SpendingTxidRow::from_db_row(&row1.to_db_row()));
+        assert_eq!(row2, SpendingTxidRow::from_db_row(&row2.to_db_row()));
     }
 
     #[test]
