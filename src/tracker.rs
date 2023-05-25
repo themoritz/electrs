@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use bitcoin::{BlockHash, Transaction, Txid, block::Header};
 
@@ -126,6 +128,14 @@ impl Tracker {
             (height, *header)
         });
         Ok(result)
+    }
+
+    pub(crate) fn lookup_spending_txids(
+        &self,
+        txid: Txid
+    ) -> Result<HashMap<usize, Txid>> {
+        let spending_txids = self.index.filter_by_spending_txids(txid).collect();
+        Ok(spending_txids)
     }
 
     pub(crate) fn lookup_spending(

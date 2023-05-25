@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::{Block, BlockHash, OutPoint, Txid};
 
+use crate::types::{SpendingTxidRow, txid_prefix};
 use crate::{
     chain::{Chain, NewHeader},
     daemon::Daemon,
@@ -78,6 +79,7 @@ struct IndexResult {
     funding_rows: Vec<HashPrefixRow>,
     spending_rows: Vec<HashPrefixRow>,
     txid_rows: Vec<HashPrefixRow>,
+    spending_txid_rows: Vec<SpendingTxidRow>,
 }
 
 impl IndexResult {
@@ -90,6 +92,9 @@ impl IndexResult {
 
         let txid_rows = self.txid_rows.iter().map(HashPrefixRow::to_db_row);
         batch.txid_rows.extend(txid_rows);
+
+        let spending_txid_rows = self.spending_txid_rows.iter().map(SpendingTxidRow::to_db_row);
+        batch.spending_txid_rows.extend(spending_txid_rows);
 
         batch.header_rows.push(self.header_row.to_db_row());
         batch.tip_row = serialize(&self.header_row.header.block_hash()).into_boxed_slice();
@@ -181,6 +186,18 @@ impl Index {
             .filter_map(move |height| self.chain.get_block_hash(height))
     }
 
+    pub(crate) fn filter_by_spending_txids(
+        &self,
+        txid: Txid
+    ) -> impl Iterator<Item = (usize, Txid)> + '_ {
+        self.store
+            .iter_spending_txid(Box::new(txid_prefix(&txid)))
+            .map(|row| {
+                let decoded = SpendingTxidRow::from_db_row(&row);
+                (decoded.vout(), decoded.txid())
+            })
+    }
+
     // Return `Ok(true)` when the chain is fully synced and the index is compacted.
     pub(crate) fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) -> Result<bool> {
         let new_headers = self
@@ -255,33 +272,41 @@ fn index_single_block(block: Block, height: usize) -> IndexResult {
     let mut funding_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.output.len()).sum());
     let mut spending_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.input.len()).sum());
     let mut txid_rows = Vec::with_capacity(block.txdata.len());
+    let mut spending_txid_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.input.len()).sum());
 
     for tx in &block.txdata {
-        txid_rows.push(TxidRow::row(tx.txid(), height));
+        // txid_rows.push(TxidRow::row(tx.txid(), height));
 
-        funding_rows.extend(
-            tx.output
-                .iter()
-                .filter(|txo| !txo.script_pubkey.is_provably_unspendable())
-                .map(|txo| {
-                    let scripthash = ScriptHash::new(&txo.script_pubkey);
-                    ScriptHashRow::row(scripthash, height)
-                }),
-        );
+        // funding_rows.extend(
+        //     tx.output
+        //         .iter()
+        //         .filter(|txo| !txo.script_pubkey.is_provably_unspendable())
+        //         .map(|txo| {
+        //             let scripthash = ScriptHash::new(&txo.script_pubkey);
+        //             ScriptHashRow::row(scripthash, height)
+        //         }),
+        // );
 
         if tx.is_coin_base() {
             continue; // coinbase doesn't have inputs
         }
-        spending_rows.extend(
+        // spending_rows.extend(
+        //     tx.input
+        //         .iter()
+        //         .map(|txin| SpendingPrefixRow::row(txin.previous_output, height)),
+        // );
+
+        spending_txid_rows.extend(
             tx.input
                 .iter()
-                .map(|txin| SpendingPrefixRow::row(txin.previous_output, height)),
+                .map(|txin| SpendingTxidRow::new(txin.previous_output.txid, txin.previous_output.vout, tx.txid())),
         );
     }
     IndexResult {
         funding_rows,
         spending_rows,
         txid_rows,
+        spending_txid_rows,
         header_row: HeaderRow::new(block.header),
     }
 }

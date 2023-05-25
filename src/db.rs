@@ -13,6 +13,7 @@ pub(crate) struct WriteBatch {
     pub(crate) funding_rows: Vec<Row>,
     pub(crate) spending_rows: Vec<Row>,
     pub(crate) txid_rows: Vec<Row>,
+    pub(crate) spending_txid_rows: Vec<Row>,
 }
 
 impl WriteBatch {
@@ -35,8 +36,9 @@ const HEADERS_CF: &str = "headers";
 const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
+const SPENDING_TXID_CF: &str = "spending_txid";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF];
+const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, SPENDING_TXID_CF];
 
 const CONFIG_KEY: &str = "C";
 const TIP_KEY: &[u8] = b"T";
@@ -211,6 +213,10 @@ impl DBStore {
         self.db.cf_handle(TXID_CF).expect("missing TXID_CF")
     }
 
+    fn spending_txid_cf(&self) -> &rocksdb::ColumnFamily {
+        self.db.cf_handle(SPENDING_TXID_CF).expect("missing SPENDING_TXID_CF")
+    }
+
     fn headers_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
     }
@@ -225,6 +231,10 @@ impl DBStore {
 
     pub(crate) fn iter_txid(&self, prefix: Row) -> impl Iterator<Item = Row> + '_ {
         self.iter_prefix_cf(self.txid_cf(), prefix)
+    }
+
+    pub(crate) fn iter_spending_txid(&self, prefix: Row) -> impl Iterator<Item = Row> + '_ {
+        self.iter_prefix_cf(self.spending_txid_cf(), prefix)
     }
 
     fn iter_prefix_cf(
@@ -266,6 +276,9 @@ impl DBStore {
         }
         for key in &batch.txid_rows {
             db_batch.put_cf(self.txid_cf(), key, b"");
+        }
+        for key in &batch.spending_txid_rows {
+            db_batch.put_cf(self.spending_txid_cf(), key, b"");
         }
         for key in &batch.header_rows {
             db_batch.put_cf(self.headers_cf(), key, b"");

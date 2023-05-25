@@ -367,6 +367,7 @@ impl Rpc {
         match self.daemon.get_transaction(&txid, None) {
             Ok(tx) => {
                 let (block_height, block_header) = self.tracker.lookup_height_and_header(txid)?.unwrap();
+                let spending_txids = self.tracker.lookup_spending_txids(txid)?;
                 let result = txgraph::Transaction {
                     timestamp: block_header.time,
                     block_height: block_height as u32,
@@ -391,10 +392,9 @@ impl Rpc {
                         })
                     }).collect::<Result<Vec<_>>>()?,
                     outputs: tx.output.iter().enumerate().map(|(o, output)| {
-                        let spending_txid = self.tracker.lookup_spending(&self.daemon, bitcoin::OutPoint { txid, vout: o as u32 })?.map(|(_blockhash, tx)| tx.txid());
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
                         Ok(txgraph::Output {
-                            spending_txid,
+                            spending_txid: spending_txids.get(&o).map(Txid::clone),
                             value: output.value,
                             address: address
                                 .clone()

@@ -53,8 +53,8 @@ pub struct SpendingTxidRow {
 impl_consensus_encoding!(SpendingTxidRow, prefix, vout, txid);
 
 impl SpendingTxidRow {
-    pub fn new(txid: Txid, vout: usize, spending_txid: Txid) -> Self {
-        let prefix = <[u8; HASH_PREFIX_LEN]>::try_from(&txid[..HASH_PREFIX_LEN]).unwrap();
+    pub fn new(txid: Txid, vout: u32, spending_txid: Txid) -> Self {
+        let prefix = txid_prefix(&txid);
         SpendingTxidRow { prefix, vout: vout as u16, txid: spending_txid }
     }
 
@@ -68,6 +68,10 @@ impl SpendingTxidRow {
 
     pub fn txid(&self) -> Txid {
         self.txid
+    }
+
+    pub fn vout(&self) -> usize {
+        self.vout as usize
     }
 }
 
@@ -159,7 +163,7 @@ impl SpendingPrefixRow {
 
 // ***************************************************************************
 
-fn txid_prefix(txid: &Txid) -> HashPrefix {
+pub fn txid_prefix(txid: &Txid) -> HashPrefix {
     let mut prefix = [0u8; HASH_PREFIX_LEN];
     prefix.copy_from_slice(&txid[..HASH_PREFIX_LEN]);
     prefix
