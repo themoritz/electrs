@@ -275,7 +275,9 @@ fn index_single_block(block: Block, height: usize) -> IndexResult {
     let mut spending_txid_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.input.len()).sum());
 
     for tx in &block.txdata {
-        txid_rows.push(TxidRow::row(tx.txid(), height));
+        let txid = tx.txid();
+
+        txid_rows.push(TxidRow::row(txid, height));
 
         // funding_rows.extend(
         //     tx.output
@@ -299,7 +301,7 @@ fn index_single_block(block: Block, height: usize) -> IndexResult {
         spending_txid_rows.extend(
             tx.input
                 .iter()
-                .map(|txin| SpendingTxidRow::new(txin.previous_output.txid, txin.previous_output.vout, tx.txid())),
+                .map(|txin| SpendingTxidRow::new(txin.previous_output.txid, txin.previous_output.vout, txid)),
         );
     }
     IndexResult {
