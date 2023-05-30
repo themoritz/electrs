@@ -364,21 +364,31 @@ impl Rpc {
 
     pub fn txgraph_get_tx(&self, txid: Txid) -> Result<Option<txgraph::Transaction>> {
         let start = Instant::now();
+
         match self.daemon.get_transaction(&txid, None) {
-            Ok(tx) => {
-                let (block_height, block_header) = self.tracker.lookup_height_and_header(txid)?.unwrap();
+            Ok(Some(tx)) => {
+                let (block_height, block_header) = self.tracker
+                    .lookup_height_and_header(txid)?
+                    .ok_or_else(|| anyhow!("No header found for txid {}", txid))?;
+
                 let spending_txids = self.tracker.lookup_spending_txids(txid)?;
+
                 let result = txgraph::Transaction {
                     timestamp: block_header.time,
                     block_height: block_height as u32,
                     txid: txid.to_string(),
-                    inputs: tx.input.iter().filter(|input| {
+
+                    inputs: tx.input.par_iter().filter(|input| {
                         // Don't include coinbase inputs
                         !input.previous_output.is_null()
                     }).map(|input| {
-                        let prev_tx = self.daemon.get_transaction(&input.previous_output.txid, None)?;
+                        let prev_tx = self.daemon
+                            .get_transaction(&input.previous_output.txid, None)?
+                            .ok_or_else(|| anyhow!("Could not find txid of previous output {}", input.previous_output))?;
+
                         let output = &prev_tx.output[input.previous_output.vout as usize];
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
+
                         Ok(txgraph::Input {
                             txid: input.previous_output.txid,
                             vout: input.previous_output.vout,
@@ -391,8 +401,10 @@ impl Rpc {
                             }),
                         })
                     }).collect::<Result<Vec<_>>>()?,
+
                     outputs: tx.output.iter().enumerate().map(|(o, output)| {
                         let address = Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin);
+
                         Ok(txgraph::Output {
                             spending_txid: spending_txids.get(&o).map(Txid::clone),
                             value: output.value,
@@ -405,13 +417,12 @@ impl Rpc {
                         })
                     }).collect::<Result<Vec<_>>>()?,
                 };
+
                 log::info!("Txid {} done, took {}ms", txid, (Instant::now() - start).as_millis());
                 Ok(Some(result))
             }
-            Err(e) => {
-                log::warn!("{}", e);
-                Ok(None)
-            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e)
         }
     }
 

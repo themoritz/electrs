@@ -59,19 +59,26 @@ pub async fn server(
                         let (sender, receiver) = crossbeam_channel::bounded(0);
                         server_tx.send(Event::get_tx(txid, sender)).unwrap();
                         match receiver.recv().unwrap() {
-                            Ok(tx) => {
+                            Ok(Some(tx)) => {
                                 let json = serde_json::to_string(&tx).unwrap();
                                 let response = builder
                                     .header(header::CONTENT_TYPE, "application/json")
                                     .body(Body::from(json))
                                     .unwrap();
-
+                                Ok(response)
+                            }
+                            Ok(None) => {
+                                let response = builder
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::from(format!("Txid not found: {}", txid)))
+                                    .unwrap();
                                 Ok(response)
                             }
                             Err(err) => {
+                                log::error!("Internal error: {:?}", err);
                                 let response = builder
-                                    .status(StatusCode::NOT_FOUND)
-                                    .body(Body::from(format!("Tx not found: {:?}", err)))
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from(format!("Error while retrieving tx: {:?}", err)))
                                     .unwrap();
                                 Ok(response)
                             }

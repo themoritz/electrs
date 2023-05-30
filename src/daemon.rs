@@ -183,7 +183,7 @@ impl Daemon {
     ) -> Result<Value> {
         use bitcoin::consensus::serde::{hex::Lower, Hex, With};
 
-        let tx = self.get_transaction(txid, blockhash)?;
+        let tx = self.get_transaction(txid, blockhash)?.ok_or_else(|| anyhow!("transaction not found"))?;
         #[derive(serde::Serialize)]
         #[serde(transparent)]
         struct TxAsHex(#[serde(with = "With::<Hex<Lower>>")] Transaction);
@@ -194,10 +194,12 @@ impl Daemon {
         &self,
         txid: &Txid,
         blockhash: Option<BlockHash>,
-    ) -> Result<Transaction> {
-        self.rpc
-            .get_raw_transaction(txid, blockhash.as_ref())
-            .context("failed to get transaction")
+    ) -> Result<Option<Transaction>> {
+        match self.rpc.get_raw_transaction(txid, blockhash.as_ref()) {
+            Ok(tx) => Ok(Some(tx)),
+            Err(bitcoincore_rpc::Error::JsonRpc(jsonrpc::Error::Rpc(RpcError { code: -5, .. }))) => Ok(None),
+            Err(e) => Err(e).context("failed to get transaction")
+        }
     }
 
     pub(crate) fn get_block_txids(&self, blockhash: BlockHash) -> Result<Vec<Txid>> {

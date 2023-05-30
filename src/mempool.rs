@@ -123,7 +123,7 @@ impl Mempool {
                     daemon.get_transaction(txid, None),
                     daemon.get_mempool_entry(txid),
                 ) {
-                    (Ok(tx), Ok(entry)) => Some((txid, tx, entry)),
+                    (Ok(Some(tx)), Ok(entry)) => Some((txid, tx, entry)),
                     _ => None,
                 }
             })
