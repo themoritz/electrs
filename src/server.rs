@@ -64,6 +64,7 @@ pub fn run() -> Result<()> {
 fn serve() -> Result<()> {
     let config = Config::from_args();
     let metrics = Metrics::new(config.monitoring_addr)?;
+    let metrics2 = metrics.clone();
 
     let (server_tx, server_rx) = unbounded();
     if !config.disable_electrum_rpc {
@@ -92,7 +93,7 @@ fn serve() -> Result<()> {
         address: config.electrum_rpc_addr,
     };
 
-    spawn("txgraph", || txgraph::main(server_tx, options));
+    spawn("txgraph", move || txgraph::main(server_tx, &metrics2, options));
 
     let new_block_rx = rpc.new_block_notification();
     let mut peers = HashMap::<usize, Peer>::new();

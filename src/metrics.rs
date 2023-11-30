@@ -12,6 +12,7 @@ mod metrics_impl {
 
     use crate::thread::spawn;
 
+    #[derive(Clone)]
     pub struct Metrics {
         reg: Registry,
     }
