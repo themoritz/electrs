@@ -114,6 +114,7 @@ pub async fn server(
                                     .body(Body::from(format!("Txid not found: {}", txid)))
                                     .unwrap();
                                 stats.response_duration.observe("404", start.elapsed().as_secs_f64());
+                                log::warn!("Txid not found: {}", txid);
                                 Ok(response)
                             }
                             Err(err) => {
@@ -123,6 +124,7 @@ pub async fn server(
                                     .body(Body::from(format!("Error while retrieving tx: {:?}", err)))
                                     .unwrap();
                                 stats.response_duration.observe("500", start.elapsed().as_secs_f64());
+                                log::error!("Internal error when handling tx {}: {:?}", txid, err);
                                 Ok(response)
                             }
                         }
@@ -133,6 +135,7 @@ pub async fn server(
                             .body(Body::from(format!("Could not parse txid: {}", err)))
                             .unwrap();
                         stats.response_duration.observe("400", start.elapsed().as_secs_f64());
+                        log::warn!("Could not parse txid `{}`: {}", &path[4..], err);
                         Ok(response)
                     }
                 }
@@ -143,6 +146,7 @@ pub async fn server(
                     .body(Body::empty())
                     .unwrap();
                 stats.response_duration.observe("405", start.elapsed().as_secs_f64());
+                log::warn!("Method not allowed: {}", req.method());
                 Ok(response)
             }
         }
@@ -152,6 +156,7 @@ pub async fn server(
             .body(Body::from("Path not found."))
             .unwrap();
         stats.response_duration.observe("404", start.elapsed().as_secs_f64());
+        log::warn!("Path not found: {}", req.uri().path());
         Ok(response)
     }
 }

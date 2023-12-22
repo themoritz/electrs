@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
 
-use std::{collections::{hash_map::Entry, HashMap}, time::Instant};
+use std::collections::{hash_map::Entry, HashMap};
 use std::iter::FromIterator;
 
 use crate::{
@@ -363,8 +363,6 @@ impl Rpc {
     }
 
     pub fn txgraph_get_tx(&self, txid: Txid) -> Result<Option<txgraph::Transaction>> {
-        let start = Instant::now();
-
         match self.daemon.get_transaction(&txid, None) {
             Ok(Some(tx)) => {
                 let (block_height, block_header) = self.tracker
@@ -418,7 +416,6 @@ impl Rpc {
                     }).collect::<Result<Vec<_>>>()?,
                 };
 
-                log::info!("Txid {} done, took {}ms", txid, (Instant::now() - start).as_millis());
                 Ok(Some(result))
             }
             Ok(None) => Ok(None),
