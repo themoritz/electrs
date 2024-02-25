@@ -87,11 +87,11 @@ pub async fn server(
 
     let start = Instant::now();
 
-    if req.uri().path().starts_with("/tx/") {
+    if req.uri().path().starts_with("/api/tx/") {
         match req.method() {
             &Method::GET => {
                 let path = req.uri().path();
-                match Txid::from_str(&path[4..]) {
+                match Txid::from_str(&path[8..]) {
                     Ok(txid) => {
                         let (sender, receiver) = crossbeam_channel::bounded(0);
                         server_tx.send(Event::get_tx(txid, sender)).unwrap();
