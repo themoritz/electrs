@@ -44,7 +44,7 @@ const CONFIG_KEY: &str = "C";
 const TIP_KEY: &[u8] = b"T";
 
 // Taken from https://github.com/facebook/rocksdb/blob/master/include/rocksdb/db.h#L654-L689
-const DB_PROPERIES: &[&str] = &[
+const DB_PROPERTIES: &[&str] = &[
     "rocksdb.num-immutable-mem-table",
     "rocksdb.mem-table-flush-pending",
     "rocksdb.compaction-pending",
@@ -123,10 +123,13 @@ impl DBStore {
             .collect()
     }
 
-    fn open_internal(path: &Path) -> Result<Self> {
+    fn open_internal(path: &Path, log_dir: Option<&Path>) -> Result<Self> {
         let mut db_opts = default_opts();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
+        if let Some(d) = log_dir {
+            db_opts.set_db_log_dir(d);
+        }
 
         let db = rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
             .with_context(|| format!("failed to open DB: {}", path.display()))?;
@@ -154,8 +157,8 @@ impl DBStore {
     }
 
     /// Opens a new RocksDB at the specified location.
-    pub fn open(path: &Path, auto_reindex: bool) -> Result<Self> {
-        let mut store = Self::open_internal(path)?;
+    pub fn open(path: &Path, log_dir: Option<&Path>, auto_reindex: bool) -> Result<Self> {
+        let mut store = Self::open_internal(path, log_dir)?;
         let config = store.get_config();
         debug!("DB {:?}", config);
         let mut config = config.unwrap_or_default(); // use default config when DB is empty
@@ -187,7 +190,7 @@ impl DBStore {
                     path.display()
                 )
             })?;
-            store = Self::open_internal(path)?;
+            store = Self::open_internal(path, log_dir)?;
             config = Config::default(); // re-init config after dropping DB
         }
         if config.compacted {
@@ -293,6 +296,7 @@ impl DBStore {
     }
 
     pub(crate) fn flush(&self) {
+        debug!("flushing DB column families");
         let mut config = self.get_config().unwrap_or_default();
         for name in COLUMN_FAMILIES {
             let cf = self.db.cf_handle(name).expect("missing CF");
@@ -324,7 +328,7 @@ impl DBStore {
     ) -> impl Iterator<Item = (&'static str, &'static str, u64)> + '_ {
         COLUMN_FAMILIES.iter().flat_map(move |cf_name| {
             let cf = self.db.cf_handle(cf_name).expect("missing CF");
-            DB_PROPERIES.iter().filter_map(move |property_name| {
+            DB_PROPERTIES.iter().filter_map(move |property_name| {
                 let value = self
                     .db
                     .property_int_value_cf(cf, *property_name)
@@ -372,18 +376,23 @@ impl Drop for DBStore {
 #[cfg(test)]
 mod tests {
     use super::{rocksdb, DBStore, WriteBatch, CURRENT_FORMAT};
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
 
     #[test]
     fn test_reindex_new_format() {
         let dir = tempfile::tempdir().unwrap();
         {
-            let store = DBStore::open(dir.path(), false).unwrap();
+            let store = DBStore::open(dir.path(), None, false).unwrap();
             let mut config = store.get_config().unwrap();
             config.format += 1;
             store.set_config(config);
         };
         assert_eq!(
-            DBStore::open(dir.path(), false).err().unwrap().to_string(),
+            DBStore::open(dir.path(), None, false)
+                .err()
+                .unwrap()
+                .to_string(),
             format!(
                 "re-index required due to unsupported format {} != {}",
                 CURRENT_FORMAT + 1,
@@ -391,11 +400,11 @@ mod tests {
             )
         );
         {
-            let store = DBStore::open(dir.path(), true).unwrap();
+            let store = DBStore::open(dir.path(), None, true).unwrap();
             store.flush();
             let config = store.get_config().unwrap();
             assert_eq!(config.format, CURRENT_FORMAT);
-            assert_eq!(store.is_legacy_format(), false);
+            assert!(!store.is_legacy_format());
         }
     }
 
@@ -409,11 +418,14 @@ mod tests {
             db.put(b"F", b"").unwrap(); // insert legacy DB compaction marker (in 'default' column family)
         };
         assert_eq!(
-            DBStore::open(dir.path(), false).err().unwrap().to_string(),
+            DBStore::open(dir.path(), None, false)
+                .err()
+                .unwrap()
+                .to_string(),
             format!("re-index required due to legacy format",)
         );
         {
-            let store = DBStore::open(dir.path(), true).unwrap();
+            let store = DBStore::open(dir.path(), None, true).unwrap();
             store.flush();
             let config = store.get_config().unwrap();
             assert_eq!(config.format, CURRENT_FORMAT);
@@ -423,7 +435,7 @@ mod tests {
     #[test]
     fn test_db_prefix_scan() {
         let dir = tempfile::tempdir().unwrap();
-        let store = DBStore::open(dir.path(), true).unwrap();
+        let store = DBStore::open(dir.path(), None, true).unwrap();
 
         let items: &[&[u8]] = &[
             b"ab",
@@ -436,9 +448,10 @@ mod tests {
             b"c",
         ];
 
-        let mut batch = WriteBatch::default();
-        batch.txid_rows = to_rows(&items);
-        store.write(&batch);
+        store.write(&WriteBatch {
+            txid_rows: to_rows(items),
+            ..Default::default()
+        });
 
         let rows = store.iter_txid(b"abcdefgh".to_vec().into_boxed_slice());
         assert_eq!(rows.collect::<Vec<_>>(), to_rows(&items[1..5]));
@@ -448,6 +461,36 @@ mod tests {
         values
             .iter()
             .map(|v| v.to_vec().into_boxed_slice())
+            .collect()
+    }
+
+    #[test]
+    fn test_db_log_in_same_dir() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let _store = DBStore::open(dir1.path(), None, true).unwrap();
+
+        // LOG file is created in dir1
+        let dir_files = list_log_files(dir1.path());
+        assert_eq!(dir_files, vec![OsStr::new("LOG")]);
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let dir3 = tempfile::tempdir().unwrap();
+        let _store = DBStore::open(dir2.path(), Some(dir3.path()), true).unwrap();
+
+        // *_LOG file is not created in dir2, but in dir3
+        let dir_files = list_log_files(dir2.path());
+        assert_eq!(dir_files, Vec::<OsString>::new());
+
+        let dir_files = list_log_files(dir3.path());
+        assert_eq!(dir_files.len(), 1);
+        assert!(dir_files[0].to_str().unwrap().ends_with("_LOG"));
+    }
+
+    fn list_log_files(path: &Path) -> Vec<OsString> {
+        path.read_dir()
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|e| e.to_str().unwrap().contains("LOG"))
             .collect()
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "electrs"
-version = "0.9.13"
+version = "0.10.4"
 authors = ["Roman Zeyde <me@romanzey.de>"]
 description = "An efficient re-implementation of Electrum Server in Rust"
 license = "MIT"
@@ -22,8 +22,9 @@ spec = "internal/config_specification.toml"
 
 [dependencies]
 anyhow = "1.0"
-bitcoin = { version = "0.30.0", features = ["serde", "rand-std"] }
-bitcoincore-rpc = "0.17.0"
+bitcoin = { version = "0.31.2", features = ["serde", "rand-std"] }
+bitcoin_slices = { version = "0.7", features = ["bitcoin", "sha2"] }
+bitcoincore-rpc = { version = "0.18" }
 configure_me = "0.4"
 crossbeam-channel = "0.5"
 dirs-next = "2.0"
@@ -31,19 +32,18 @@ env_logger = "0.10"
 log = "0.4"
 parking_lot = "0.12"
 prometheus = { version = "0.13", optional = true }
-rayon = "1.7"
+rayon = "1.9"
 serde = "1.0"
-serde_derive = "1.0"
+serde_derive = "1.0, <=1.0.171"  # avoid precompiled binaries (https://github.com/serde-rs/serde/issues/2538)
 serde_json = "1.0"
 signal-hook = "0.3"
 tiny_http = { version = "0.12", optional = true }
-hex_lit = "0.1.1"
 hyper = { version = "0.14", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3.28"
 
 [dependencies.electrs-rocksdb]
-version = "0.19.0-e1"
+version = "0.19.0-e3"
 
 default-features = false
 # ZSTD is used for data compression
@@ -54,4 +54,6 @@ features = ["zstd", "snappy"]
 configure_me_codegen = { version = "0.4.4", default-features = false }
 
 [dev-dependencies]
-tempfile = "3.5"
+bitcoin-test-data = "0.2.0"
+hex_lit = "0.1.1"
+tempfile = "3.10"

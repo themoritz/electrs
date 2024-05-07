@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
-use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::{Block, BlockHash, OutPoint, Txid};
+use bitcoin::consensus::{deserialize, serialize, Decodable};
+use bitcoin::{BlockHash, OutPoint, Txid};
+use bitcoin_slices::{bsl, Visit, Visitor};
+use std::ops::ControlFlow;
 
 use crate::types::{SpendingTxidRow, txid_prefix};
 use crate::{
@@ -9,7 +11,10 @@ use crate::{
     db::{DBStore, Row, WriteBatch},
     metrics::{self, Gauge, Histogram, Metrics},
     signals::ExitFlag,
-    types::{HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SpendingPrefixRow, TxidRow},
+    types::{
+        bsl_txid, HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
+        TxidRow,
+    },
 };
 
 #[derive(Clone)]
@@ -74,33 +79,6 @@ impl Stats {
     }
 }
 
-struct IndexResult {
-    header_row: HeaderRow,
-    funding_rows: Vec<HashPrefixRow>,
-    spending_rows: Vec<HashPrefixRow>,
-    txid_rows: Vec<HashPrefixRow>,
-    spending_txid_rows: Vec<SpendingTxidRow>,
-}
-
-impl IndexResult {
-    fn extend(&self, batch: &mut WriteBatch) {
-        let funding_rows = self.funding_rows.iter().map(HashPrefixRow::to_db_row);
-        batch.funding_rows.extend(funding_rows);
-
-        let spending_rows = self.spending_rows.iter().map(HashPrefixRow::to_db_row);
-        batch.spending_rows.extend(spending_rows);
-
-        let txid_rows = self.txid_rows.iter().map(HashPrefixRow::to_db_row);
-        batch.txid_rows.extend(txid_rows);
-
-        let spending_txid_rows = self.spending_txid_rows.iter().map(SpendingTxidRow::to_db_row);
-        batch.spending_txid_rows.extend(spending_txid_rows);
-
-        batch.header_rows.push(self.header_row.to_db_row());
-        batch.tip_row = serialize(&self.header_row.header.block_hash()).into_boxed_slice();
-    }
-}
-
 /// Confirmed transactions' address index
 pub struct Index {
     store: DBStore,
@@ -109,6 +87,7 @@ pub struct Index {
     chain: Chain,
     stats: Stats,
     is_ready: bool,
+    flush_needed: bool,
 }
 
 impl Index {
@@ -140,6 +119,7 @@ impl Index {
             chain,
             stats,
             is_ready: false,
+            flush_needed: false,
         })
     }
 
@@ -214,7 +194,10 @@ impl Index {
                 );
             }
             _ => {
-                self.store.flush(); // full compaction is performed on the first flush call
+                if self.flush_needed {
+                    self.store.flush(); // full compaction is performed on the first flush call
+                    self.flush_needed = false;
+                }
                 self.is_ready = true;
                 return Ok(true); // no more blocks to index (done for now)
             }
@@ -230,6 +213,7 @@ impl Index {
         }
         self.chain.update(new_headers);
         self.stats.observe_chain(&self.chain);
+        self.flush_needed = true;
         Ok(false) // sync is not done
     }
 
@@ -238,10 +222,11 @@ impl Index {
         let mut heights = chunk.iter().map(|h| h.height());
 
         let mut batch = WriteBatch::default();
-        daemon.for_blocks(blockhashes, |_blockhash, block| {
+
+        daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
             self.stats.observe_duration("block", || {
-                index_single_block(block, height).extend(&mut batch)
+                index_single_block(blockhash, block, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -268,47 +253,57 @@ fn db_rows_size(rows: &[Row]) -> usize {
     rows.iter().map(|key| key.len()).sum()
 }
 
-fn index_single_block(block: Block, height: usize) -> IndexResult {
-    let mut funding_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.output.len()).sum());
-    let mut spending_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.input.len()).sum());
-    let mut txid_rows = Vec::with_capacity(block.txdata.len());
-    let mut spending_txid_rows = Vec::with_capacity(block.txdata.iter().map(|tx| tx.input.len()).sum());
+fn index_single_block(
+    block_hash: BlockHash,
+    block: SerBlock,
+    height: usize,
+    batch: &mut WriteBatch,
+) {
+    struct IndexBlockVisitor<'a> {
+        batch: &'a mut WriteBatch,
+        height: usize,
+    }
 
-    for tx in &block.txdata {
-        let txid = tx.txid();
-
-        txid_rows.push(TxidRow::row(txid, height));
-
-        // funding_rows.extend(
-        //     tx.output
-        //         .iter()
-        //         .filter(|txo| !txo.script_pubkey.is_provably_unspendable())
-        //         .map(|txo| {
-        //             let scripthash = ScriptHash::new(&txo.script_pubkey);
-        //             ScriptHashRow::row(scripthash, height)
-        //         }),
-        // );
-
-        if tx.is_coin_base() {
-            continue; // coinbase doesn't have inputs
+    impl<'a> Visitor for IndexBlockVisitor<'a> {
+        fn visit_transaction(&mut self, tx: &bsl::Transaction) -> ControlFlow<()> {
+            let txid = bsl_txid(tx);
+            self.batch
+                .txid_rows
+                .push(TxidRow::row(txid, self.height).to_db_row());
+            ControlFlow::Continue(())
         }
-        // spending_rows.extend(
-        //     tx.input
-        //         .iter()
-        //         .map(|txin| SpendingPrefixRow::row(txin.previous_output, height)),
-        // );
 
-        spending_txid_rows.extend(
-            tx.input
-                .iter()
-                .map(|txin| SpendingTxidRow::new(txin.previous_output.txid, txin.previous_output.vout, txid)),
-        );
+        fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut) -> ControlFlow<()> {
+            let script = bitcoin::Script::from_bytes(tx_out.script_pubkey());
+            // skip indexing unspendable outputs
+            if !script.is_provably_unspendable() {
+                let row = ScriptHashRow::row(ScriptHash::new(script), self.height);
+                self.batch.funding_rows.push(row.to_db_row());
+            }
+            ControlFlow::Continue(())
+        }
+
+        fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn) -> ControlFlow<()> {
+            let prevout: OutPoint = tx_in.prevout().into();
+            // skip indexing coinbase transactions' input
+            if !prevout.is_null() {
+                let row = SpendingPrefixRow::row(prevout, self.height);
+                self.batch.spending_rows.push(row.to_db_row());
+            }
+            ControlFlow::Continue(())
+        }
+
+        fn visit_block_header(&mut self, header: &bsl::BlockHeader) -> ControlFlow<()> {
+            let header = bitcoin::block::Header::consensus_decode(&mut header.as_ref())
+                .expect("block header was already validated");
+            self.batch
+                .header_rows
+                .push(HeaderRow::new(header).to_db_row());
+            ControlFlow::Continue(())
+        }
     }
-    IndexResult {
-        funding_rows,
-        spending_rows,
-        txid_rows,
-        spending_txid_rows,
-        header_row: HeaderRow::new(block.header),
-    }
+
+    let mut index_block = IndexBlockVisitor { batch, height };
+    bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
+    batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

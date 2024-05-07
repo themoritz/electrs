@@ -5,8 +5,8 @@
 
 ```bash
 $ sudo apt update
-$ sudo apt install -y clang cmake build-essential git cargo 
-$ git clone https://github.com/romanz/electrs 
+$ sudo apt install -y clang cmake build-essential git cargo
+$ git clone https://github.com/romanz/electrs
 $ cd electrs
 $ cargo build --locked --release
 $ ./target/release/electrs --version  # should print the latest version
@@ -136,7 +136,7 @@ sudo mount --rbind /sys debootstrap-buster/sys
 sudo mount --rbind /dev debootstrap-buster/dev
 ```
 
-If you have checked out the electrs git reposity somewhere already and don't want to have a duplicate copy inside the debootstrap working directory, just mount bind the exiting directory into the chroot:
+If you have checked out the electrs git repository somewhere already and don't want to have a duplicate copy inside the debootstrap working directory, just mount bind the exiting directory into the chroot:
 ```
 sudo mkdir -p debootstrap-buster/mnt/electrs
 sudo mount --rbind ./electrs debootstrap-buster/mnt/electrs
@@ -205,6 +205,11 @@ $ RUSTFLAGS="-C link-args=-latomic" cargo build --locked --release
 Relevant issues: [#134](https://github.com/romanz/electrs/issues/134) and [#391](https://github.com/romanz/electrs/issues/391).
 
 #### Dynamic linking
+
+Note that if you have previously done a static linking build, it is recommended to clean the build artifacts to avoid build errors (e.g. https://github.com/romanz/electrs/issues/1001):
+```
+$ cargo clean
+```
 
 ```
 $ ROCKSDB_INCLUDE_DIR=/usr/include ROCKSDB_LIB_DIR=/usr/lib cargo build --locked --release

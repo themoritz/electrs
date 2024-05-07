@@ -30,6 +30,11 @@ doc = "Directory to store index database (default: ./db/)"
 default = "\"./db\".into()"
 
 [[param]]
+name = "db_log_dir"
+type = "std::path::PathBuf"
+doc = "Directory to store index database internal log (default: same as specified by `db_dir`)"
+
+[[param]]
 name = "daemon_dir"
 type = "std::path::PathBuf"
 doc = "Data directory of Bitcoind (default: ~/.bitcoin/)"
@@ -52,7 +57,7 @@ doc = "JSONRPC authentication cookie file (default: ~/.bitcoin/.cookie)"
 [[param]]
 name = "network"
 type = "crate::config::BitcoinNetwork"
-convert_into = "::bitcoin::network::constants::Network"
+convert_into = "::bitcoin::Network"
 doc = "Select Bitcoin network type ('bitcoin', 'testnet', 'regtest' or 'signet')"
 default = "Default::default()"
 
@@ -73,7 +78,7 @@ doc = "Bitcoin daemon p2p 'addr:port' to connect (default: 127.0.0.1:8333 for ma
 [[param]]
 name = "monitoring_addr"
 type = "crate::config::ResolvAddr"
-doc = "Prometheus monitoring 'addr:port' to listen on (default: 127.0.0.1:4224 for mainnet, 127.0.0.1:14224 for testnet, 127.0.0.1:24224 for regtest and 127.0.0.1:34224 for regtest)"
+doc = "Prometheus monitoring 'addr:port' to listen on (default: 127.0.0.1:4224 for mainnet, 127.0.0.1:14224 for testnet, 127.0.0.1:24224 for regtest and 127.0.0.1:34224 for signet)"
 
 [[param]]
 name = "wait_duration_secs"
@@ -104,6 +109,10 @@ doc = "Disable Electrum RPC server - only sync and index blocks."
 [[switch]]
 name = "sync_once"
 doc = "Exit after the initial sync is over (don't start Electrum server)."
+
+[[switch]]
+name = "skip_block_download_wait"
+doc = "Don't wait for block download to finish before starting sync."
 
 [[switch]]
 name = "version"

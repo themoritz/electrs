@@ -25,6 +25,8 @@ $ bitcoind -server=1 -txindex=0 -prune=0
 ```
 ### Electrs configuration
 
+**Note:** this documentation may occasionally become stale. We recommend running `electrs --help` to get an up-to-date list of options.
+
 Electrs can be configured using command line, environment variables and configuration files (or their combination).
 It is highly recommended to use configuration files for any non-trivial setups since it's easier to manage.
 If you're setting password manually instead of cookie files, configuration file is the only way to set it due to security reasons.
@@ -36,10 +38,12 @@ can lead to serious problems! Currently the *only* permitted operation is *delet
 #### Configuration files and priorities
 
 The Toml-formatted config files ([an example here](config_example.toml)) are (from lowest priority to highest): `/etc/electrs/config.toml`, `~/.electrs/config.toml`, `./electrs.toml`.
+They are loaded if they *exist* and ignored if not however, to aid debugging, any other error when opening them such as permission error will make electrs exit with error.
 
 The options in highest-priority config files override options set in lowest-priority config files.
+If loading these files is undesirable (common in case of protected systemd services), use the `--skip-default-conf-files` argument to prevent it.
 
-**Environment variables** override options in config files and finally **arguments** override everythig else.
+**Environment variables** override options in config files and finally **arguments** override everything else.
 
 There are two special arguments `--conf` which reads the specified file and `--conf-dir`, which read all the files in the specified directory.
 
@@ -69,6 +73,14 @@ allowing this server to use bitcoind JSONRPC interface.
 
 Note: there was a `cookie` option in the version 0.8.7 and below, it's now deprecated - do **not** use, it will be removed.
 Please read upgrade notes if you're upgrading to a newer version.
+
+## Connecting an Electrum client ##
+
+To connect to your Electrs server, you will need to point Electrum to your server using the `ip_address:port` syntax. You will notice that most default servers in Electrum use the `50002` port (which is for SSL connections), while Electrs serves port `50001` and does not provide SSL out of the box.
+
+You would need to either use a webserver to provide SSL (see _SSL connection_ below), or connect without SSL. To tell Electrum to connect to your server without SSL, you need to add `:t` after the port (ie: `localhost:50001:t`). Please note that this is not secure and therefore recommended only for local connections.
+
+Electrs will listen by default on `127.0.0.1:50001`, which means it will only serve clients in the local machine. This is configured via the `electrum_rpc_addr` setting and if you wish to connect from another machine, you need to change it to `0.0.0.0:50001`. This is less secure though, and the recommended way to access Electrs remotely is to keep listening on `127.0.0.1` and tunnel to your server.
 
 ## Extra configuration suggestions
 
@@ -171,6 +183,14 @@ KillMode=process
 TimeoutSec=60
 Restart=always
 RestartSec=60
+
+Environment="RUST_BACKTRACE=1"
+
+# Hardening measures
+PrivateTmp=true
+ProtectSystem=full
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target

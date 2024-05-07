@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
@@ -7,13 +7,12 @@ use std::ops::Bound;
 
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, Transaction, Txid};
-use bitcoincore_rpc::json;
-use rayon::prelude::*;
 use serde::ser::{Serialize, SerializeSeq, Serializer};
 
 use crate::{
     daemon::Daemon,
     metrics::{Gauge, Metrics},
+    signals::ExitFlag,
     types::ScriptHash,
 };
 
@@ -36,6 +35,88 @@ pub(crate) struct Mempool {
     count: Gauge,
 }
 
+/// An update to [`Mempool`]'s internal state. This can be fetched
+/// asynchronously using [`MempoolSyncUpdate::poll`], and applied
+/// using [`Mempool::apply_sync_update`].
+pub(crate) struct MempoolSyncUpdate {
+    new_entries: Vec<Entry>,
+    removed_entries: HashSet<Txid>,
+}
+
+impl MempoolSyncUpdate {
+    /// Poll the bitcoin node and compute a [`MempoolSyncUpdate`] based on the given set of
+    /// `old_txids` which are already cached.
+    pub fn poll(
+        daemon: &Daemon,
+        old_txids: HashSet<Txid>,
+        exit_flag: &ExitFlag,
+    ) -> Result<MempoolSyncUpdate> {
+        let txids = daemon.get_mempool_txids()?;
+        debug!("loading {} mempool transactions", txids.len());
+
+        let new_txids = HashSet::<Txid>::from_iter(txids);
+
+        let to_add = &new_txids - &old_txids;
+        let to_remove = &old_txids - &new_txids;
+
+        let to_add: Vec<Txid> = to_add.into_iter().collect();
+        let mut new_entries = Vec::with_capacity(to_add.len());
+
+        for txids_chunk in to_add.chunks(1000) {
+            exit_flag.poll().context("mempool update interrupted")?;
+            let entries = daemon.get_mempool_entries(txids_chunk)?;
+            ensure!(
+                txids_chunk.len() == entries.len(),
+                "got {} mempools entries, expected {}",
+                entries.len(),
+                txids_chunk.len()
+            );
+            let txs = daemon.get_mempool_transactions(txids_chunk)?;
+            ensure!(
+                txids_chunk.len() == txs.len(),
+                "got {} mempools transactions, expected {}",
+                txs.len(),
+                txids_chunk.len()
+            );
+            let chunk_entries: Vec<Entry> = txids_chunk
+                .iter()
+                .zip(entries.into_iter().zip(txs.into_iter()))
+                .filter_map(|(txid, (entry, tx))| {
+                    let entry = match entry {
+                        Some(entry) => entry,
+                        None => {
+                            warn!("missing mempool entry: {}", txid);
+                            return None;
+                        }
+                    };
+                    let tx = match tx {
+                        Some(tx) => tx,
+                        None => {
+                            warn!("missing mempool tx: {}", txid);
+                            return None;
+                        }
+                    };
+                    Some(Entry {
+                        txid: *txid,
+                        tx,
+                        vsize: entry.vsize,
+                        fee: entry.fees.base,
+                        has_unconfirmed_inputs: !entry.depends.is_empty(),
+                    })
+                })
+                .collect();
+
+            new_entries.extend(chunk_entries);
+        }
+
+        let update = MempoolSyncUpdate {
+            new_entries,
+            removed_entries: to_remove,
+        };
+        Ok(update)
+    }
+}
+
 // Smallest possible txid
 fn txid_min() -> Txid {
     Txid::all_zeros()
@@ -52,7 +133,7 @@ impl Mempool {
             entries: Default::default(),
             by_funding: Default::default(),
             by_spending: Default::default(),
-            fees: FeeHistogram::empty(),
+            fees: FeeHistogram::default(),
             vsize: metrics.gauge(
                 "mempool_txs_vsize",
                 "Total vsize of mempool transactions (in bytes)",
@@ -96,50 +177,21 @@ impl Mempool {
             .collect()
     }
 
-    pub fn sync(&mut self, daemon: &Daemon) {
-        let txids = match daemon.get_mempool_txids() {
-            Ok(txids) => txids,
-            Err(e) => {
-                warn!("mempool sync failed: {}", e);
-                return;
-            }
-        };
-        debug!("loading {} mempool transactions", txids.len());
+    /// Apply a [`MempoolSyncUpdate`] to the mempool state.
+    pub fn apply_sync_update(&mut self, update: MempoolSyncUpdate) {
+        let removed = update.removed_entries.len();
+        let added = update.new_entries.len();
 
-        let new_txids = HashSet::<Txid>::from_iter(txids);
-        let old_txids = HashSet::<Txid>::from_iter(self.entries.keys().copied());
+        for txid_to_remove in update.removed_entries {
+            self.remove_entry(txid_to_remove);
+        }
 
-        let to_add = &new_txids - &old_txids;
-        let to_remove = &old_txids - &new_txids;
+        for entry in update.new_entries {
+            self.add_entry(entry);
+        }
 
-        let removed = to_remove.len();
-        for txid in to_remove {
-            self.remove_entry(txid);
-        }
-        let entries: Vec<_> = to_add
-            .par_iter()
-            .filter_map(|txid| {
-                match (
-                    daemon.get_transaction(txid, None),
-                    daemon.get_mempool_entry(txid),
-                ) {
-                    (Ok(Some(tx)), Ok(entry)) => Some((txid, tx, entry)),
-                    _ => None,
-                }
-            })
-            .collect();
-        let added = entries.len();
-        for (txid, tx, entry) in entries {
-            self.add_entry(*txid, tx, entry);
-        }
-        self.fees = FeeHistogram::new(self.entries.values().map(|e| (e.fee, e.vsize)));
-        for i in 0..FeeHistogram::BINS {
-            let bin_index = FeeHistogram::BINS - i - 1; // from 63 to 0
-            let limit = 1u128 << i;
-            let label = format!("[{:20.0}, {:20.0})", limit / 2, limit);
-            self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
-            self.count.set(&label, self.fees.count[bin_index] as f64);
-        }
+        self.update_metrics();
+
         debug!(
             "{} mempool txs: {} added, {} removed",
             self.entries.len(),
@@ -148,27 +200,51 @@ impl Mempool {
         );
     }
 
-    fn add_entry(&mut self, txid: Txid, tx: Transaction, entry: json::GetMempoolEntryResult) {
-        for txi in &tx.input {
-            self.by_spending.insert((txi.previous_output, txid));
+    fn update_metrics(&mut self) {
+        for i in 0..FeeHistogram::BINS {
+            let bin_index = FeeHistogram::BINS - i - 1; // from 63 to 0
+            let (lower, upper) = FeeHistogram::bin_range(bin_index);
+            let label = format!("[{:20.0}, {:20.0})", lower, upper);
+            self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
+            self.count.set(&label, self.fees.count[bin_index] as f64);
         }
-        for txo in &tx.output {
-            let scripthash = ScriptHash::new(&txo.script_pubkey);
-            self.by_funding.insert((scripthash, txid)); // may have duplicates
-        }
-        let entry = Entry {
-            txid,
-            tx,
-            vsize: entry.vsize,
-            fee: entry.fees.base,
-            has_unconfirmed_inputs: !entry.depends.is_empty(),
+    }
+
+    pub fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) {
+        let old_txids = HashSet::<Txid>::from_iter(self.entries.keys().copied());
+
+        let poll_result = MempoolSyncUpdate::poll(daemon, old_txids, exit_flag);
+
+        let sync_update = match poll_result {
+            Ok(sync_update) => sync_update,
+            Err(e) => {
+                warn!("mempool sync failed: {}", e);
+                return;
+            }
         };
+
+        self.apply_sync_update(sync_update);
+    }
+
+    /// Add a transaction entry to the mempool and update the fee histogram.
+    fn add_entry(&mut self, entry: Entry) {
+        for txi in &entry.tx.input {
+            self.by_spending.insert((txi.previous_output, entry.txid));
+        }
+        for txo in &entry.tx.output {
+            let scripthash = ScriptHash::new(&txo.script_pubkey);
+            self.by_funding.insert((scripthash, entry.txid)); // may have duplicates
+        }
+
+        self.modify_fee_histogram(entry.fee, entry.vsize as i64);
+
         assert!(
-            self.entries.insert(txid, entry).is_none(),
+            self.entries.insert(entry.txid, entry).is_none(),
             "duplicate mempool txid"
         );
     }
 
+    /// Remove a transaction entry from the mempool and update the fee histogram.
     fn remove_entry(&mut self, txid: Txid) {
         let entry = self.entries.remove(&txid).expect("missing tx from mempool");
         for txi in entry.tx.input {
@@ -177,6 +253,22 @@ impl Mempool {
         for txo in entry.tx.output {
             let scripthash = ScriptHash::new(&txo.script_pubkey);
             self.by_funding.remove(&(scripthash, txid)); // may have misses
+        }
+
+        self.modify_fee_histogram(entry.fee, -(entry.vsize as i64));
+    }
+
+    /// Apply a change to the fee histogram. Used when transactions are added or
+    /// removed from the mempool. If `vsize_change` is positive, we increase
+    /// the histogram vsize and TX count in the appropriate bin. If negative,
+    /// we decrease them.
+    fn modify_fee_histogram(&mut self, fee: Amount, vsize_change: i64) {
+        let vsize = vsize_change.unsigned_abs();
+        let bin_index = FeeHistogram::bin_index(fee, vsize);
+        if vsize_change >= 0 {
+            self.fees.insert(bin_index, vsize);
+        } else {
+            self.fees.remove(bin_index, vsize);
         }
     }
 }
@@ -207,24 +299,40 @@ impl Default for FeeHistogram {
 impl FeeHistogram {
     const BINS: usize = 65; // 0..=64
 
-    fn empty() -> Self {
-        Self::new(std::iter::empty())
+    fn bin_index(fee: Amount, vsize: u64) -> usize {
+        let fee_rate = fee.to_sat() / vsize;
+        usize::try_from(fee_rate.leading_zeros()).unwrap()
     }
 
-    fn new(items: impl Iterator<Item = (Amount, u64)>) -> Self {
-        let mut result = FeeHistogram::default();
-        for (fee, vsize) in items {
-            let fee_rate = fee.to_sat() / vsize;
-            let index = usize::try_from(fee_rate.leading_zeros()).unwrap();
-            // skip transactions with too low fee rate (<1 sat/vB)
-            if let Some(bin) = result.vsize.get_mut(index) {
-                *bin += vsize
-            }
-            if let Some(bin) = result.count.get_mut(index) {
-                *bin += 1
-            }
+    fn bin_range(bin_index: usize) -> (u128, u128) {
+        let limit = 1u128 << (FeeHistogram::BINS - bin_index - 1);
+        (limit / 2, limit)
+    }
+
+    fn insert(&mut self, bin_index: usize, vsize: u64) {
+        // skip transactions with too low fee rate (<1 sat/vB)
+        if let Some(bin) = self.vsize.get_mut(bin_index) {
+            *bin += vsize
         }
-        result
+        if let Some(bin) = self.count.get_mut(bin_index) {
+            *bin += 1
+        }
+    }
+
+    fn remove(&mut self, bin_index: usize, vsize: u64) {
+        // skip transactions with too low fee rate (<1 sat/vB)
+        if let Some(bin) = self.vsize.get_mut(bin_index) {
+            *bin = bin.checked_sub(vsize).unwrap_or_else(|| {
+                warn!("removing TX from mempool caused bin count to unexpectedly drop below zero");
+                0
+            });
+        }
+        if let Some(bin) = self.count.get_mut(bin_index) {
+            *bin = bin.checked_sub(1).unwrap_or_else(|| {
+                warn!("removing TX from mempool caused bin vsize to unexpectedly drop below zero");
+                0
+            });
+        }
     }
 }
 
@@ -264,10 +372,50 @@ mod tests {
             (Amount::from_sat(80), 10),
             (Amount::from_sat(1), 100),
         ];
-        let hist = FeeHistogram::new(items.into_iter());
+        let mut hist = FeeHistogram::default();
+        for (amount, vsize) in items {
+            let bin_index = FeeHistogram::bin_index(amount, vsize);
+            hist.insert(bin_index, vsize);
+        }
         assert_eq!(
             json!(hist),
             json!([[15, 10], [7, 40], [3, 20], [1, 10], [0, 100]])
         );
+
+        {
+            let bin_index = FeeHistogram::bin_index(Amount::from_sat(5), 1); // 5 sat/byte
+            hist.remove(bin_index, 11);
+            assert_eq!(
+                json!(hist),
+                json!([[15, 10], [7, 29], [3, 20], [1, 10], [0, 100]])
+            );
+        }
+
+        {
+            let bin_index = FeeHistogram::bin_index(Amount::from_sat(13), 1); // 13 sat/byte
+            hist.insert(bin_index, 80);
+            assert_eq!(
+                json!(hist),
+                json!([[15, 90], [7, 29], [3, 20], [1, 10], [0, 100]])
+            );
+        }
+
+        {
+            let bin_index = FeeHistogram::bin_index(Amount::from_sat(99), 1); // 99 sat/byte
+            hist.insert(bin_index, 15);
+            assert_eq!(
+                json!(hist),
+                json!([
+                    [127, 15],
+                    [63, 0],
+                    [31, 0],
+                    [15, 90],
+                    [7, 29],
+                    [3, 20],
+                    [1, 10],
+                    [0, 100]
+                ])
+            );
+        }
     }
 }

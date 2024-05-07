@@ -2,6 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use bitcoin::{BlockHash, Transaction, Txid, block::Header};
+use bitcoin_slices::{
+    bsl::{self, FindTransaction},
+    Error::VisitBreak,
+    Visit,
+};
 
 use crate::{
     cache::Cache,
@@ -30,7 +35,11 @@ pub(crate) enum Error {
 
 impl Tracker {
     pub fn new(config: &Config, metrics: Metrics) -> Result<Self> {
-        let store = DBStore::open(&config.db_path, config.auto_reindex)?;
+        let store = DBStore::open(
+            &config.db_path,
+            config.db_log_dir.as_deref(),
+            config.auto_reindex,
+        )?;
         let chain = Chain::new(config.network);
         Ok(Self {
             index: Index::load(
@@ -67,7 +76,7 @@ impl Tracker {
     pub(crate) fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) -> Result<bool> {
         let done = self.index.sync(daemon, exit_flag)?;
         if done && !self.ignore_mempool {
-            self.mempool.sync(daemon);
+            self.mempool.sync(daemon, exit_flag);
             // TODO: double check tip - and retry on diff
         }
         Ok(done)
@@ -104,15 +113,14 @@ impl Tracker {
         let blockhashes = self.index.filter_by_txid(txid);
         let mut result = None;
         daemon.for_blocks(blockhashes, |blockhash, block| {
-            for tx in block.txdata {
-                if result.is_some() {
-                    return;
-                }
-                if tx.txid() == txid {
-                    result = Some((blockhash, tx));
-                    return;
-                }
+            if result.is_some() {
+                return; // keep first matching transaction
             }
+            let mut visitor = FindTransaction::new(txid);
+            result = match bsl::Block::visit(&block, &mut visitor) {
+                Ok(_) | Err(VisitBreak) => visitor.tx_found().map(|tx| (blockhash, tx)),
+                Err(e) => panic!("core returned invalid block: {:?}", e),
+            };
         })?;
         Ok(result)
     }

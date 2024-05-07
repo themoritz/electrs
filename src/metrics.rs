@@ -27,8 +27,13 @@ mod metrics_impl {
 
             let result = Self { reg };
             let reg = result.reg.clone();
+
+            let server = match Server::http(addr) {
+                Ok(server) => server,
+                Err(err) => bail!("failed to start HTTP server on {}: {}", addr, err),
+            };
+
             spawn("metrics", move || {
-                let server = Server::http(addr).unwrap();
                 for request in server.incoming_requests() {
                     let mut buffer = vec![];
                     prometheus::TextEncoder::new()
@@ -52,6 +57,7 @@ mod metrics_impl {
             label: &str,
             buckets: Vec<f64>,
         ) -> Histogram {
+            let name = String::from("electrs_") + name;
             let opts = HistogramOpts::new(name, desc).buckets(buckets);
             let hist = HistogramVec::new(opts, &[label]).unwrap();
             self.reg
@@ -61,6 +67,7 @@ mod metrics_impl {
         }
 
         pub fn gauge(&self, name: &str, desc: &str, label: &str) -> Gauge {
+            let name = String::from("electrs_") + name;
             let opts = prometheus::Opts::new(name, desc);
             let gauge = prometheus::GaugeVec::new(opts, &[label]).unwrap();
             self.reg

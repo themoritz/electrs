@@ -1,4 +1,5 @@
-use bitcoin::network::constants::{Magic, Network};
+use bitcoin::p2p::Magic;
+use bitcoin::Network;
 use bitcoincore_rpc::Auth;
 use dirs_next::home_dir;
 
@@ -126,6 +127,7 @@ pub struct Config {
     // See below for the documentation of each field:
     pub network: Network,
     pub db_path: PathBuf,
+    pub db_log_dir: Option<PathBuf>,
     pub daemon_dir: PathBuf,
     pub daemon_auth: SensitiveAuth,
     pub daemon_rpc_addr: SocketAddr,
@@ -140,6 +142,7 @@ pub struct Config {
     pub auto_reindex: bool,
     pub ignore_mempool: bool,
     pub sync_once: bool,
+    pub skip_block_download_wait: bool,
     pub disable_electrum_rpc: bool,
     pub server_banner: String,
     pub signet_magic: Magic,
@@ -332,6 +335,7 @@ impl Config {
         let config = Config {
             network: config.network,
             db_path: config.db_dir,
+            db_log_dir: config.db_log_dir,
             daemon_dir: config.daemon_dir,
             daemon_auth,
             daemon_rpc_addr,
@@ -346,6 +350,7 @@ impl Config {
             auto_reindex: config.auto_reindex,
             ignore_mempool: config.ignore_mempool,
             sync_once: config.sync_once,
+            skip_block_download_wait: config.skip_block_download_wait,
             disable_electrum_rpc: config.disable_electrum_rpc,
             server_banner: config.server_banner,
             signet_magic: magic,

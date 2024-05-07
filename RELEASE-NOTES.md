@@ -1,3 +1,63 @@
+# 0.10.4 (Mar 15 2024)
+
+* Don't fail mempool sync on missing transactions (#997)
+* Update dependencies (`anyhow`, `crossbeam-channel`, `log`, `secp256k1`, `secp256k1-sys`, `smallvec`, `tempfile`, `termcolor`, `thiserror`, `thiserror-impl`)
+
+# 0.10.3 (Feb 10 2024)
+
+* Update dependencies (`serde_json`, `tempfile`, `env_logger`, `rayon`, `bitcoin`, `crossbeam-channel`, `shlex`)
+* Fix build on Debian 12 (#1001)
+
+# 0.10.2 (Dec 31 2023)
+
+* Use batched RPC to fetch mempool entries & transactions (#979)
+* Avoid redundant recomputation of fee histogram bins (#971)
+* Explain behavior of config file loading (#964)
+* Don't flush when nothing is written to DB (#958)
+* Allow setting RocksDB log directory (#959)
+* Upgrade `bitcoin` to 0.31.0 (#941)
+* Update dependencies (#953, #951, #980)
+
+# 0.10.1 (Nov 01 2023)
+
+* Fix build failure on Raspberry Pi 4 (32bit) (#940)
+* Return first txid-matching transaction (#933)
+* Add txid collision scanner (#928)
+* Optimize indexing via `bitcoin_slices` (#927)
+* Optimize index querying via `bitcoin_slices` (#913)
+* Avoid precompiled 'serde_derive' >=1.0.172 (#924)
+* Allow exiting mempool sync on SIGINT (#917)
+* Allow skipping merkle proof downloads in `history.py` (#915)
+* Remove IndexResult and index into db::WriteBatch (#914)
+* Dockerfile: re-add curl for the second time, so it can be used for docker health checks (#912)
+* Reuse buffer in p2p handling (#910)
+* Preallocate serialized vector of HashPrefixRow (#909)
+* Less verbose logging when bitcoind is warming up (#908)
+* Drop Cirrus CI due to flakiness (#948)
+* Update dependencies (`anyhow`, `bitcoin`, `electrs-rocksdb`, `rayon`, `rustix`, `serde`, `serde_derive`, `serde_json`, `signal-hook`, `syn`, `tempfile`)
+
+
+# 0.10.0 (Jul 22 2023)
+
+* Add ARM build and integration tests in Cirrus CI
+
+# 0.10.0-rc.1 (Jun 21 2023)
+
+* Bump MSRV to 1.63.0 and update Rust edition to 2021 (#773)
+* Update dependencies (`anyhow`, `configure_me_codegen`, `electrs-rocksdb`, `env_logger`, `parking_lot`, `prometheus`, `rayon`, `serde`, `serde_derive`, `serde_json`)
+  - Please note that [dynamic linking with RocksDB](doc/install.md) now requires [RocksDB 7.8.3](https://packages.debian.org/bookworm/librocksdb-dev) (instead of 6.11.4)!
+
+# 0.9.14 (Jun 10 2023)
+
+* Fix 'server.version' support for version range (#887)
+* Allow not waiting for block download before sync (#888)
+* Fix typo in config_specification.toml (#883)
+* Bump bitcoind version used in CI (#882)
+* Prefix Prometheus metrics with 'electrs_' (#881)
+* Fixup error handling in Prometheus HTTP server (#880)
+* Add address->scripthash conversion tool
+* Update dependencies (crossbeam-channel, jsonrpc, bitcoincore-rpc, serde_json, tempfile)
+
 # 0.9.13 (Mar 31 2023)
 
 * Upgrade dependencies (`bitcoin` & `bitcoincore-rpc` #865, `crossbeam-channel` #854, `serde_json` #855, `tempfile` #850)
