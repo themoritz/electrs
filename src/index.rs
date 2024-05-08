@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
-use bitcoin::{BlockHash, OutPoint, Txid};
+use bitcoin::{BlockHash, OutPoint, Transaction, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
 use std::ops::ControlFlow;
 
@@ -12,7 +12,7 @@ use crate::{
     metrics::{self, Gauge, Histogram, Metrics},
     signals::ExitFlag,
     types::{
-        bsl_txid, HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
+        HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
         TxidRow,
     },
 };
@@ -266,30 +266,21 @@ fn index_single_block(
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
         fn visit_transaction(&mut self, tx: &bsl::Transaction) -> ControlFlow<()> {
-            let txid = bsl_txid(tx);
+            let transaction: Transaction = deserialize(tx.as_ref()).expect("invalid transaction");
+            let txid = transaction.txid();
+
             self.batch
                 .txid_rows
                 .push(TxidRow::row(txid, self.height).to_db_row());
-            ControlFlow::Continue(())
-        }
 
-        fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut) -> ControlFlow<()> {
-            let script = bitcoin::Script::from_bytes(tx_out.script_pubkey());
-            // skip indexing unspendable outputs
-            if !script.is_provably_unspendable() {
-                let row = ScriptHashRow::row(ScriptHash::new(script), self.height);
-                self.batch.funding_rows.push(row.to_db_row());
+            if !transaction.is_coinbase() {
+                self.batch.spending_txid_rows.extend(
+                    transaction.input.iter().map(|txin| {
+                        SpendingTxidRow::new(txin.previous_output.txid, txin.previous_output.vout, txid).to_db_row()
+                    })
+                );
             }
-            ControlFlow::Continue(())
-        }
 
-        fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn) -> ControlFlow<()> {
-            let prevout: OutPoint = tx_in.prevout().into();
-            // skip indexing coinbase transactions' input
-            if !prevout.is_null() {
-                let row = SpendingPrefixRow::row(prevout, self.height);
-                self.batch.spending_rows.push(row.to_db_row());
-            }
             ControlFlow::Continue(())
         }
 
