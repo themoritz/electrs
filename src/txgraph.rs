@@ -3,7 +3,10 @@ use std::{str::FromStr, net::SocketAddr, time::Instant};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use serde_json::Value;
+use sqlx::types::{Json, Uuid};
 use tokio::runtime::Runtime;
+use sha2::Digest;
 
 use crate::{server::Event, metrics::{Histogram, self, Metrics}};
 use bitcoin::Txid;
@@ -52,6 +55,8 @@ pub struct Options {
 pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
+        let pool = sqlx::postgres::PgPool::connect("postgres://localhost/postgres").await?;
+
         let stats = Stats::new(metrics);
         let service = make_service_fn(move |_| {
             let server_tx = server_tx.clone();
@@ -185,4 +190,125 @@ pub struct Output {
     pub value: u64,
     pub address: String,
     pub address_type: String,
+}
+
+async fn create_user(pool: &sqlx::PgPool, email: &str, password: &str) -> Result<()> {
+    // Check for existing user with email
+    let existing_user = sqlx::query!(
+            r#"SELECT id FROM users WHERE email = $1"#,
+            email
+        )
+        .fetch_optional(pool)
+        .await?;
+
+    if existing_user.is_some() {
+        return Err(anyhow::anyhow!("Email already exists"));
+    }
+
+    let password_salt: [u8; 16] = rand::random();
+    let password_hash = hash_password(password, &password_salt);
+
+    sqlx::query!(
+            r#"INSERT INTO users (email, password_hash, password_salt) VALUES ($1, $2, $3)"#,
+            email,
+            &password_hash as &[u8],
+            &password_salt as &[u8; 16]
+        )
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+fn hash_password(password: &str, salt: &[u8]) -> Vec<u8> {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(password);
+    hasher.update(salt);
+    hasher.finalize().as_slice().to_vec()
+}
+
+enum LoginResult {
+    Success {
+        user_id: i32,
+        session_id: Uuid,
+    },
+    InvalidPassword,
+    UserNotFound,
+}
+
+async fn login(pool: &sqlx::PgPool, email: &str, password: &str) -> Result<LoginResult> {
+    struct User {
+        id: i32,
+        password_hash: Vec<u8>,
+        password_salt: Vec<u8>,
+    }
+
+    let user = sqlx::query_as!(
+            User,
+            r#"SELECT id, password_hash, password_salt FROM users WHERE email = $1"#,
+            email
+        )
+        .fetch_optional(pool)
+        .await?;
+
+    match user {
+        None => Ok(LoginResult::UserNotFound),
+        Some(user) => {
+
+            let password_hash = hash_password(password, &user.password_salt[0..16]);
+
+            if password_hash != user.password_hash {
+                return Ok(LoginResult::InvalidPassword);
+            }
+
+            let session_id = Uuid::from_bytes(rand::random());
+
+            sqlx::query!(
+                    r#"INSERT INTO sessions (id, user_id) VALUES ($1, $2)"#,
+                    session_id,
+                    user.id,
+                )
+                .execute(pool)
+                .await?;
+
+            Ok(LoginResult::Success {
+                user_id: user.id,
+                session_id,
+            })
+        }
+    }
+}
+
+async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32> {
+    let session = sqlx::query!(
+            r#"SELECT user_id FROM sessions WHERE id = $1"#,
+            session_id
+        )
+        .fetch_optional(pool)
+        .await?;
+
+    let session = session.ok_or_else(|| anyhow::anyhow!("Invalid session"))?;
+    Ok(session.user_id)
+}
+
+async fn create_project(
+    pool: &sqlx::PgPool,
+    session_id: Uuid,
+    name: &str,
+    data: serde_json::Value,
+    is_private: bool
+) -> Result<i32> {
+    let user_id = authenticate(pool, session_id).await?;
+
+    let row = sqlx::query!(
+            r#"INSERT INTO projects (user_id, name, data, is_private) VALUES ($1, $2, $3, $4) RETURNING id"#,
+            user_id,
+            name,
+            data,
+            is_private
+        )
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.id)
 }
