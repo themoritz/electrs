@@ -67,6 +67,15 @@ fn serve() -> Result<()> {
     let metrics2 = metrics.clone();
 
     let (server_tx, server_rx) = unbounded();
+    let server_tx2 = server_tx.clone();
+
+    let options = txgraph::Options {
+        dev: true,
+        address: config.electrum_rpc_addr,
+    };
+
+    spawn("txgraph", move || txgraph::main(server_tx2, &metrics2, options));
+
     if !config.disable_electrum_rpc {
         let server_tx = server_tx.clone();
         let listener = TcpListener::bind(config.electrum_rpc_addr)?;
@@ -87,13 +96,6 @@ fn serve() -> Result<()> {
         metrics::default_duration_buckets(),
     );
     let mut rpc = Rpc::new(&config, metrics)?;
-
-    let options = txgraph::Options {
-        dev: true,
-        address: config.electrum_rpc_addr,
-    };
-
-    spawn("txgraph", move || txgraph::main(server_tx, &metrics2, options));
 
     let new_block_rx = rpc.new_block_notification();
     let mut peers = HashMap::<usize, Peer>::new();

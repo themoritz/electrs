@@ -1,19 +1,18 @@
-
-use std::{str::FromStr, net::SocketAddr, time::Instant};
+use std::{convert::Infallible, net::SocketAddr, time::Instant};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
-use serde_json::Value;
-use sqlx::types::{Json, Uuid};
-use tokio::runtime::Runtime;
 use sha2::Digest;
+use sqlx::types::{chrono, Uuid};
+use tokio::runtime::Runtime;
+use warp::{filters::reply::WithHeader, reply::Reply, Filter};
 
-use crate::{server::Event, metrics::{Histogram, self, Metrics}};
+use crate::{
+    metrics::{self, Histogram, Metrics},
+    server::Event,
+};
 use bitcoin::Txid;
-use hyper::{header, Body, Method, Request, Response, StatusCode, service::{service_fn, make_service_fn}, Server};
 use serde::{Deserialize, Serialize};
-
-type GenericError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Stats {
@@ -58,112 +57,21 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
         let pool = sqlx::postgres::PgPool::connect("postgres://localhost/postgres").await?;
 
         let stats = Stats::new(metrics);
-        let service = make_service_fn(move |_| {
-            let server_tx = server_tx.clone();
-            let stats = stats.clone();
-            async move {
-                Ok::<_, GenericError>(service_fn(move |req| {
-                    server(server_tx.to_owned(), stats.to_owned(), options.dev, req)
-                }))
-            }
-        });
 
-        let server = Server::bind(&options.address)
-            .serve(service);
+        let routes = tx_get_filter(server_tx, stats)
+            .or(create_user_filter(pool.clone()))
+            .or(login_filter(pool));
+
+        let api = warp::path("api")
+            .and(routes)
+            .recover(handle_rejection)
+            .with(allow_all_origin());
+
         log::info!("Listening on http://{}", options.address);
-
-        server.await?;
+        warp::serve(api).run(options.address).await;
 
         Ok(())
     })
-}
-
-pub async fn server(
-    server_tx: Sender<Event>,
-    stats: Stats,
-    dev: bool,
-    req: Request<Body>,
-) -> Result<Response<Body>, std::io::Error> {
-    let builder = if dev {
-        Response::builder().header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-    } else {
-        Response::builder()
-    };
-
-    let start = Instant::now();
-
-    if req.uri().path().starts_with("/api/tx/") {
-        match req.method() {
-            &Method::GET => {
-                let path = req.uri().path();
-                match Txid::from_str(&path[8..]) {
-                    Ok(txid) => {
-                        let (sender, receiver) = crossbeam_channel::bounded(0);
-                        server_tx.send(Event::get_tx(txid, sender)).unwrap();
-                        match receiver.recv().unwrap() {
-                            Ok(Some(tx)) => {
-                                let json = serde_json::to_string(&tx).unwrap();
-                                let response = builder
-                                    .header(header::CONTENT_TYPE, "application/json")
-                                    .body(Body::from(json))
-                                    .unwrap();
-                                let elapsed = start.elapsed().as_secs_f64();
-                                stats.response_duration.observe("200", elapsed);
-                                stats.response_per_input_duration.observe("200", elapsed / tx.inputs.len() as f64);
-                                stats.response_per_output_duration.observe("200", elapsed / tx.outputs.len() as f64);
-                                Ok(response)
-                            }
-                            Ok(None) => {
-                                let response = builder
-                                    .status(StatusCode::NOT_FOUND)
-                                    .body(Body::from(format!("Txid not found: {}", txid)))
-                                    .unwrap();
-                                stats.response_duration.observe("404", start.elapsed().as_secs_f64());
-                                log::warn!("Txid not found: {}", txid);
-                                Ok(response)
-                            }
-                            Err(err) => {
-                                log::error!("Internal error: {:?}", err);
-                                let response = builder
-                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                    .body(Body::from(format!("Error while retrieving tx: {:?}", err)))
-                                    .unwrap();
-                                stats.response_duration.observe("500", start.elapsed().as_secs_f64());
-                                log::error!("Internal error when handling tx {}: {:?}", txid, err);
-                                Ok(response)
-                            }
-                        }
-                    },
-                    Err(err) => {
-                        let response = builder
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from(format!("Could not parse txid: {}", err)))
-                            .unwrap();
-                        stats.response_duration.observe("400", start.elapsed().as_secs_f64());
-                        log::warn!("Could not parse txid `{}`: {}", &path[4..], err);
-                        Ok(response)
-                    }
-                }
-            }
-            _ => {
-                let response = builder
-                    .status(StatusCode::METHOD_NOT_ALLOWED)
-                    .body(Body::empty())
-                    .unwrap();
-                stats.response_duration.observe("405", start.elapsed().as_secs_f64());
-                log::warn!("Method not allowed: {}", req.method());
-                Ok(response)
-            }
-        }
-    } else {
-        let response = builder
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::from("Path not found."))
-            .unwrap();
-        stats.response_duration.observe("404", start.elapsed().as_secs_f64());
-        log::warn!("Path not found: {}", req.uri().path());
-        Ok(response)
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,32 +100,229 @@ pub struct Output {
     pub address_type: String,
 }
 
-async fn create_user(pool: &sqlx::PgPool, email: &str, password: &str) -> Result<()> {
-    // Check for existing user with email
-    let existing_user = sqlx::query!(
-            r#"SELECT id FROM users WHERE email = $1"#,
-            email
-        )
+// Error messages
+
+#[derive(Debug)]
+struct InternalError(anyhow::Error);
+
+#[derive(Debug)]
+struct DbError(sqlx::Error);
+
+fn from_sqlx_error(err: sqlx::Error) -> warp::Rejection {
+    warp::reject::custom(DbError(err))
+}
+
+#[derive(Debug)]
+struct SessionNotFound;
+
+impl warp::reject::Reject for InternalError {}
+impl warp::reject::Reject for DbError {}
+impl warp::reject::Reject for SessionNotFound {}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejection> {
+    if let Some(err) = err.find::<InternalError>() {
+        log::error!("Internal error: {:?}", err.0);
+        Ok(warp::reply::with_status(
+            warp::reply().into_response(),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ))
+    } else if let Some(err) = err.find::<DbError>() {
+        log::error!("Database error: {:?}", err.0);
+        Ok(warp::reply::with_status(
+            warp::reply().into_response(),
+            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+        ))
+    } else if err.find::<SessionNotFound>().is_some() {
+        Ok(warp::reply::with_status(
+            "Session not found\n".into_response(),
+            warp::http::StatusCode::UNAUTHORIZED,
+        ))
+    } else {
+        Err(err)
+    }
+}
+
+// Filter and handler helpers
+
+fn session() -> impl warp::Filter<Extract = (sqlx::types::Uuid,), Error = warp::Rejection> + Clone {
+    warp::header::<Uuid>("Session")
+}
+
+fn with_db(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (sqlx::PgPool,), Error = Infallible> + Clone {
+    warp::any().map(move || pool.clone())
+}
+
+fn allow_all_origin() -> WithHeader {
+    warp::reply::with::header("Access-Control-Allow-Origin", "*")
+}
+
+async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32, warp::Rejection> {
+    let session = sqlx::query!(r#"SELECT user_id FROM sessions WHERE id = $1"#, session_id)
         .fetch_optional(pool)
-        .await?;
+        .await
+        .map_err(from_sqlx_error)?;
+
+    let session = session.ok_or_else(|| warp::reject::custom(SessionNotFound))?;
+    Ok(session.user_id)
+}
+
+// GET /tx/:txid
+
+fn tx_get_filter(
+    server_tx: Sender<Event>,
+    stats: Stats,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("tx" / Txid)
+        .and(warp::get())
+        .and(warp::any().map(move || server_tx.clone()))
+        .and(warp::any().map(move || stats.clone()))
+        .and_then(tx_get)
+}
+
+async fn tx_get(
+    txid: Txid,
+    server_tx: Sender<Event>,
+    stats: Stats,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let start = Instant::now();
+
+    let (sender, receiver) = crossbeam_channel::bounded(0);
+    server_tx.send(Event::get_tx(txid, sender)).unwrap();
+    match receiver.recv().unwrap() {
+        // TODO: make async
+        Ok(Some(tx)) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            stats.response_duration.observe("200", elapsed);
+            stats
+                .response_per_input_duration
+                .observe("200", elapsed / tx.inputs.len() as f64);
+            stats
+                .response_per_output_duration
+                .observe("200", elapsed / tx.outputs.len() as f64);
+            Ok(warp::reply::json(&tx))
+        }
+        Ok(None) => {
+            stats
+                .response_duration
+                .observe("404", start.elapsed().as_secs_f64());
+            log::warn!("Txid not found: {}", txid);
+            Err(warp::reject::not_found())
+        }
+        Err(err) => {
+            stats
+                .response_duration
+                .observe("500", start.elapsed().as_secs_f64());
+            log::error!("Internal error when handling tx {}: {:?}", txid, err);
+            Err(warp::reject::custom(InternalError(err)))
+        }
+    }
+}
+
+// POST /user/create
+
+enum CreateUserResult {
+    Success {
+        user_id: i32,
+        session_id: Uuid,
+    },
+    EmailExists,
+    InvalidEmail,
+}
+
+impl warp::Reply for CreateUserResult {
+    fn into_response(self) -> warp::reply::Response {
+        match self {
+            Self::Success { user_id, session_id } => warp::reply::json(&serde_json::json!({
+                "user_id": user_id,
+                "session_id": session_id.to_string(),
+            }))
+            .into_response(),
+            Self::EmailExists => warp::reply::with_status(
+                "Email already exists\n".into_response(),
+                warp::http::StatusCode::CONFLICT,
+            )
+            .into_response(),
+            Self::InvalidEmail => warp::reply::with_status(
+                "Invalid email\n".into_response(),
+                warp::http::StatusCode::BAD_REQUEST,
+            )
+            .into_response(),
+        }
+    }
+}
+
+fn create_user_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    #[derive(Deserialize)]
+    struct CreateUser {
+        email: String,
+        password: String,
+    }
+
+    warp::path!("user" / "create")
+        .and(warp::post())
+        .and(with_db(pool))
+        .and(warp::body::json())
+        .and_then(|pool, input: CreateUser| create_user(pool, input.email, input.password))
+}
+
+lazy_static::lazy_static! {
+    static ref EMAIL_REGEX: regex::Regex = regex::Regex::new(
+        r"(?x)
+            ^                          # start of the string
+            [a-zA-Z0-9_.+-]+           # username: alphanumeric, dots, underscores, pluses, and hyphens
+            @                          # @ symbol
+            ([a-zA-Z0-9-]+\.)+         # domain name: alphanumeric and hyphens
+            [a-zA-Z]{2,63}             # top-level domain: 2 to 63 alphanumeric characters
+            $                          # end of the string
+        "
+    ).unwrap();
+}
+
+fn is_valid_email(email: &str) -> bool {
+    EMAIL_REGEX.is_match(email)
+}
+
+async fn create_user(
+    pool: sqlx::PgPool,
+    email: String,
+    password: String,
+) -> Result<CreateUserResult, warp::Rejection> {
+    if !is_valid_email(&email) {
+        return Ok(CreateUserResult::InvalidEmail);
+    }
+
+    // Check for existing user with email
+    let existing_user = sqlx::query!(r#"SELECT id FROM users WHERE email = $1"#, email)
+        .fetch_optional(&pool)
+        .await
+        .map_err(from_sqlx_error)?;
 
     if existing_user.is_some() {
-        return Err(anyhow::anyhow!("Email already exists"));
+        return Ok(CreateUserResult::EmailExists);
     }
 
     let password_salt: [u8; 16] = rand::random();
-    let password_hash = hash_password(password, &password_salt);
+    let password_hash = hash_password(&password, &password_salt);
 
     sqlx::query!(
-            r#"INSERT INTO users (email, password_hash, password_salt) VALUES ($1, $2, $3)"#,
-            email,
-            &password_hash as &[u8],
-            &password_salt as &[u8; 16]
-        )
-        .execute(pool)
-        .await?;
+        r#"INSERT INTO users (email, password_hash, password_salt) VALUES ($1, $2, $3)"#,
+        email,
+        &password_hash as &[u8],
+        &password_salt as &[u8; 16]
+    )
+    .execute(&pool)
+    .await
+    .map_err(from_sqlx_error)?;
 
-    Ok(())
+    if let LoginResult::Success { user_id, session_id } = login(pool.clone(), email, password).await? {
+        Ok(CreateUserResult::Success { user_id, session_id })
+    } else {
+        Err(warp::reject::custom(InternalError(anyhow::anyhow!("Failed to login after creating user"))))
+    }
 }
 
 fn hash_password(password: &str, salt: &[u8]) -> Vec<u8> {
@@ -227,49 +332,103 @@ fn hash_password(password: &str, salt: &[u8]) -> Vec<u8> {
     hasher.finalize().as_slice().to_vec()
 }
 
-enum LoginResult {
-    Success {
-        user_id: i32,
-        session_id: Uuid,
-    },
-    InvalidPassword,
-    UserNotFound,
+// /user/login
+
+fn login_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    #[derive(Deserialize)]
+    struct Login {
+        email: String,
+        password: String,
+    }
+
+    warp::path!("user" / "login")
+        .and(warp::post())
+        .and(with_db(pool))
+        .and(warp::body::json())
+        .and_then(|pool, input: Login| login(pool, input.email, input.password))
 }
 
-async fn login(pool: &sqlx::PgPool, email: &str, password: &str) -> Result<LoginResult> {
+enum LoginResult {
+    Success { user_id: i32, session_id: Uuid },
+    InvalidPassword,
+    EmailNotFound,
+}
+
+impl warp::Reply for LoginResult {
+    fn into_response(self) -> warp::reply::Response {
+        match self {
+            Self::EmailNotFound => warp::reply::with_status(
+                "Email does not exist\n".into_response(),
+                warp::http::StatusCode::UNAUTHORIZED,
+            )
+            .into_response(),
+            Self::InvalidPassword => warp::reply::with_status(
+                "Invalid password\n".into_response(),
+                warp::http::StatusCode::UNAUTHORIZED,
+            )
+            .into_response(),
+            Self::Success {
+                user_id,
+                session_id,
+            } => warp::reply::json(&serde_json::json!({
+                "user_id": user_id,
+                "session_id": session_id.to_string(),
+            }))
+            .into_response(),
+        }
+    }
+}
+
+struct Bytea(Vec<u8>);
+
+impl From<String> for Bytea {
+    fn from(s: String) -> Self {
+        let s = s.trim_start_matches("\\x");
+        Self(hex::decode(s).unwrap())
+    }
+}
+
+async fn login(
+    pool: sqlx::PgPool,
+    email: String,
+    password: String,
+) -> Result<LoginResult, warp::Rejection> {
     struct User {
         id: i32,
-        password_hash: Vec<u8>,
-        password_salt: Vec<u8>,
+        password_hash: Bytea,
+        password_salt: Bytea,
     }
 
     let user = sqlx::query_as!(
-            User,
-            r#"SELECT id, password_hash, password_salt FROM users WHERE email = $1"#,
-            email
-        )
-        .fetch_optional(pool)
-        .await?;
+        User,
+        r#"SELECT id, password_hash, password_salt FROM users WHERE email = $1"#,
+        email
+    )
+    .fetch_optional(&pool)
+    .await
+    .map_err(from_sqlx_error)?;
 
     match user {
-        None => Ok(LoginResult::UserNotFound),
+        None => Ok(LoginResult::EmailNotFound),
         Some(user) => {
+            let password_hash = hash_password(&password, &user.password_salt.0[0..16]);
 
-            let password_hash = hash_password(password, &user.password_salt[0..16]);
-
-            if password_hash != user.password_hash {
+            if password_hash != user.password_hash.0 {
                 return Ok(LoginResult::InvalidPassword);
             }
 
             let session_id = Uuid::from_bytes(rand::random());
 
             sqlx::query!(
-                    r#"INSERT INTO sessions (id, user_id) VALUES ($1, $2)"#,
-                    session_id,
-                    user.id,
-                )
-                .execute(pool)
-                .await?;
+                r#"INSERT INTO sessions (id, user_id) VALUES ($1, $2)"#,
+                session_id,
+                user.id,
+            )
+            .execute(&pool)
+            .await
+            .map_err(from_sqlx_error)?;
 
             Ok(LoginResult::Success {
                 user_id: user.id,
@@ -279,26 +438,34 @@ async fn login(pool: &sqlx::PgPool, email: &str, password: &str) -> Result<Login
     }
 }
 
-async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32> {
-    let session = sqlx::query!(
-            r#"SELECT user_id FROM sessions WHERE id = $1"#,
-            session_id
-        )
-        .fetch_optional(pool)
-        .await?;
+// POST /project/create
 
-    let session = session.ok_or_else(|| anyhow::anyhow!("Invalid session"))?;
-    Ok(session.user_id)
+fn create_project_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    #[derive(Deserialize)]
+    struct CreateProject {
+        name: String,
+        data: serde_json::Value,
+        is_private: bool,
+    }
+
+    warp::path!("project" / "create")
+        .and(warp::post())
+        .and(session())
+        .and(with_db(pool))
+        .and(warp::body::json())
+        .and_then(|session_id, pool, input: CreateProject| create_project(pool, session_id, input.name, input.data, input.is_private))
 }
 
 async fn create_project(
-    pool: &sqlx::PgPool,
+    pool: sqlx::PgPool,
     session_id: Uuid,
-    name: &str,
+    name: String,
     data: serde_json::Value,
-    is_private: bool
-) -> Result<i32> {
-    let user_id = authenticate(pool, session_id).await?;
+    is_private: bool,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let user_id = authenticate(&pool, session_id).await?;
 
     let row = sqlx::query!(
             r#"INSERT INTO projects (user_id, name, data, is_private) VALUES ($1, $2, $3, $4) RETURNING id"#,
@@ -307,8 +474,53 @@ async fn create_project(
             data,
             is_private
         )
-        .fetch_one(pool)
-        .await?;
+        .fetch_one(&pool)
+        .await
+        .map_err(from_sqlx_error)?;
 
-    Ok(row.id)
+    Ok(warp::reply::json(&serde_json::json!({ "project_id": row.id })))
+}
+
+struct Project {
+    id: i32,
+    user_id: i32,
+    name: String,
+    data: serde_json::Value,
+    is_private: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Get a project belonging to the authenticated user.
+async fn get_private_project(
+    pool: &sqlx::PgPool,
+    session_id: Uuid,
+    project_id: i32,
+) -> Result<Project> {
+    let user_id = authenticate(pool, session_id).await?;
+
+    let row = sqlx::query_as!(
+        Project,
+        r#"SELECT * FROM projects WHERE id = $1 AND user_id = $2"#,
+        project_id,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let row = row.ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+    Ok(row)
+}
+
+/// Get a public project.
+async fn get_public_project(pool: &sqlx::PgPool, project_id: i32) -> Result<Project> {
+    let row = sqlx::query_as!(
+        Project,
+        r#"SELECT * FROM projects WHERE id = $1 AND is_private = false"#,
+        project_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let row = row.ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+    Ok(row)
 }
