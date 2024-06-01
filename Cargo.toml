@@ -47,6 +47,7 @@ warp = "0.3.7"
 hex = "0.4"
 regex = "1.10.4"
 lazy_static = "1.4.0"
+chrono = { version = "0.4.38", features = ["serde"] }
 
 [dependencies.electrs-rocksdb]
 version = "0.19.0-e3"

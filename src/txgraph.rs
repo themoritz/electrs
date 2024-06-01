@@ -60,7 +60,10 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
 
         let routes = tx_get_filter(server_tx, stats)
             .or(create_user_filter(pool.clone()))
-            .or(login_filter(pool));
+            .or(login_filter(pool.clone()))
+            .or(create_project_filter(pool.clone()))
+            .or(get_project_filter(pool.clone()))
+            .or(get_public_project_filter(pool.clone()));
 
         let api = warp::path("api")
             .and(routes)
@@ -143,6 +146,15 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, warp
 }
 
 // Filter and handler helpers
+
+struct Bytea(Vec<u8>);
+
+impl From<String> for Bytea {
+    fn from(s: String) -> Self {
+        let s = s.trim_start_matches("\\x");
+        Self(hex::decode(s).unwrap())
+    }
+}
 
 fn session() -> impl warp::Filter<Extract = (sqlx::types::Uuid,), Error = warp::Rejection> + Clone {
     warp::header::<Uuid>("Session")
@@ -381,15 +393,6 @@ impl warp::Reply for LoginResult {
     }
 }
 
-struct Bytea(Vec<u8>);
-
-impl From<String> for Bytea {
-    fn from(s: String) -> Self {
-        let s = s.trim_start_matches("\\x");
-        Self(hex::decode(s).unwrap())
-    }
-}
-
 async fn login(
     pool: sqlx::PgPool,
     email: String,
@@ -481,6 +484,9 @@ async fn create_project(
     Ok(warp::reply::json(&serde_json::json!({ "project_id": row.id })))
 }
 
+// GET /project/:project_id
+
+#[derive(Serialize)]
 struct Project {
     id: i32,
     user_id: i32,
@@ -490,13 +496,29 @@ struct Project {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+impl Reply for Project {
+    fn into_response(self) -> warp::reply::Response {
+        warp::reply::json(&self).into_response()
+    }
+}
+
+fn get_project_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (Project,), Error = warp::Rejection> + Clone {
+    warp::path!("project" / i32)
+        .and(warp::get())
+        .and(session())
+        .and(with_db(pool))
+        .and_then(get_project)
+}
+
 /// Get a project belonging to the authenticated user.
-async fn get_private_project(
-    pool: &sqlx::PgPool,
-    session_id: Uuid,
+async fn get_project(
     project_id: i32,
-) -> Result<Project> {
-    let user_id = authenticate(pool, session_id).await?;
+    session_id: Uuid,
+    pool: sqlx::PgPool,
+) -> Result<Project, warp::Rejection> {
+    let user_id = authenticate(&pool, session_id).await?;
 
     let row = sqlx::query_as!(
         Project,
@@ -504,23 +526,36 @@ async fn get_private_project(
         project_id,
         user_id
     )
-    .fetch_optional(pool)
-    .await?;
+    .fetch_optional(&pool)
+    .await
+    .map_err(from_sqlx_error)?;
 
-    let row = row.ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+    let row = row.ok_or_else(warp::reject::not_found)?;
     Ok(row)
 }
 
+// GET /project/public/:project_id
+
+fn get_public_project_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (Project,), Error = warp::Rejection> + Clone {
+    warp::path!("project" / "public" / i32)
+        .and(warp::get())
+        .and(with_db(pool))
+        .and_then(get_public_project)
+}
+
 /// Get a public project.
-async fn get_public_project(pool: &sqlx::PgPool, project_id: i32) -> Result<Project> {
+async fn get_public_project(project_id: i32, pool: sqlx::PgPool) -> Result<Project, warp::Rejection> {
     let row = sqlx::query_as!(
         Project,
         r#"SELECT * FROM projects WHERE id = $1 AND is_private = false"#,
         project_id
     )
-    .fetch_optional(pool)
-    .await?;
+    .fetch_optional(&pool)
+    .await
+    .map_err(from_sqlx_error)?;
 
-    let row = row.ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+    let row = row.ok_or_else(warp::reject::not_found)?;
     Ok(row)
 }
