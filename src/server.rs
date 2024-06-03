@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use bitcoin::Txid;
 use crossbeam_channel::{select, unbounded, Sender};
 use rayon::prelude::*;
+use tokio::sync::oneshot;
 
 use std::{
     collections::hash_map::HashMap,
@@ -170,7 +171,7 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn get_tx(txid: Txid, callback: Sender<Result<Option<txgraph::Transaction>>>) -> Self {
+    pub fn get_tx(txid: Txid, callback: oneshot::Sender<Result<Option<txgraph::Transaction>>>) -> Self {
         Self {
             peer_id: 0,
             msg: Message::GetTx(txid, callback)
@@ -181,7 +182,7 @@ impl Event {
 enum Message {
     New(TcpStream),
     Request(String),
-    GetTx(Txid, Sender<Result<Option<txgraph::Transaction>>>),
+    GetTx(Txid, oneshot::Sender<Result<Option<txgraph::Transaction>>>),
     Done,
 }
 
@@ -211,7 +212,9 @@ fn handle_peer_events(
             }
             Message::Request(line) => lines.push(line),
             Message::GetTx(txid, callback) => {
-                callback.send(rpc.txgraph_get_tx(txid)).unwrap();
+                callback.send(rpc.txgraph_get_tx(txid)).unwrap_or_else(|_| {
+                    log::warn!("Failed to send Message::GetTx response: client already disconnected.")
+                });
             },
             Message::Done => {
                 done = true;

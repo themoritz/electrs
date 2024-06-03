@@ -1,10 +1,10 @@
-use std::{convert::Infallible, net::SocketAddr, time::Instant};
+use std::{convert::Infallible, fmt::Debug, net::SocketAddr, time::Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
 use sha2::Digest;
 use sqlx::types::{chrono, Uuid};
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, task::spawn_blocking};
 use warp::{filters::reply::WithHeader, reply::Reply, Filter};
 
 use crate::{
@@ -108,29 +108,36 @@ pub struct Output {
 #[derive(Debug)]
 struct InternalError(anyhow::Error);
 
-#[derive(Debug)]
-struct DbError(sqlx::Error);
+impl warp::reject::Reject for InternalError {}
 
-fn from_sqlx_error(err: sqlx::Error) -> warp::Rejection {
-    warp::reject::custom(DbError(err))
+fn internal_error<T, M>(msg: M) -> Result<T, warp::Rejection>
+where
+    M: std::fmt::Display + Debug + Send + Sync + 'static,
+{
+    Err(warp::reject::custom(InternalError(anyhow!(msg))))
+}
+
+trait ConvertError<T, E> {
+    fn convert_error(self) -> Result<T, warp::Rejection>;
+}
+
+impl<T, E> ConvertError<T, E> for Result<T, E>
+where
+    E: Into<anyhow::Error>,
+{
+    fn convert_error(self) -> Result<T, warp::Rejection> {
+        self.map_err(|err| warp::reject::custom(InternalError(anyhow!(err))))
+    }
 }
 
 #[derive(Debug)]
 struct SessionNotFound;
 
-impl warp::reject::Reject for InternalError {}
-impl warp::reject::Reject for DbError {}
 impl warp::reject::Reject for SessionNotFound {}
 
 async fn handle_rejection(err: warp::Rejection) -> Result<impl warp::Reply, warp::Rejection> {
     if let Some(err) = err.find::<InternalError>() {
         log::error!("Internal error: {:?}", err.0);
-        Ok(warp::reply::with_status(
-            warp::reply().into_response(),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        ))
-    } else if let Some(err) = err.find::<DbError>() {
-        log::error!("Database error: {:?}", err.0);
         Ok(warp::reply::with_status(
             warp::reply().into_response(),
             warp::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -174,7 +181,8 @@ async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32, warp
     let session = sqlx::query!(r#"SELECT user_id FROM sessions WHERE id = $1"#, session_id)
         .fetch_optional(pool)
         .await
-        .map_err(from_sqlx_error)?;
+        .with_context(|| format!("Failed to authenticate session with id {session_id}"))
+        .convert_error()?;
 
     let session = session.ok_or_else(|| warp::reject::custom(SessionNotFound))?;
     Ok(session.user_id)
@@ -200,10 +208,13 @@ async fn tx_get(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let start = Instant::now();
 
-    let (sender, receiver) = crossbeam_channel::bounded(0);
-    server_tx.send(Event::get_tx(txid, sender)).unwrap();
-    match receiver.recv().unwrap() {
-        // TODO: make async
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+
+    spawn_blocking(move || server_tx.send(Event::get_tx(txid, sender)).convert_error())
+        .await
+        .convert_error()??;
+
+    match receiver.await.convert_error()? {
         Ok(Some(tx)) => {
             let elapsed = start.elapsed().as_secs_f64();
             stats.response_duration.observe("200", elapsed);
@@ -235,10 +246,7 @@ async fn tx_get(
 // POST /user/create
 
 enum CreateUserResult {
-    Success {
-        user_id: i32,
-        session_id: Uuid,
-    },
+    Success { user_id: i32, session_id: Uuid },
     EmailExists,
     InvalidEmail,
 }
@@ -246,7 +254,10 @@ enum CreateUserResult {
 impl warp::Reply for CreateUserResult {
     fn into_response(self) -> warp::reply::Response {
         match self {
-            Self::Success { user_id, session_id } => warp::reply::json(&serde_json::json!({
+            Self::Success {
+                user_id,
+                session_id,
+            } => warp::reply::json(&serde_json::json!({
                 "user_id": user_id,
                 "session_id": session_id.to_string(),
             }))
@@ -311,7 +322,8 @@ async fn create_user(
     let existing_user = sqlx::query!(r#"SELECT id FROM users WHERE email = $1"#, email)
         .fetch_optional(&pool)
         .await
-        .map_err(from_sqlx_error)?;
+        .with_context(|| format!("Failed to check for existing user with email `{email}`"))
+        .convert_error()?;
 
     if existing_user.is_some() {
         return Ok(CreateUserResult::EmailExists);
@@ -328,12 +340,22 @@ async fn create_user(
     )
     .execute(&pool)
     .await
-    .map_err(from_sqlx_error)?;
+    .with_context(|| format!("Failed to create user with email `{email}`"))
+    .convert_error()?;
 
-    if let LoginResult::Success { user_id, session_id } = login(pool.clone(), email, password).await? {
-        Ok(CreateUserResult::Success { user_id, session_id })
+    if let LoginResult::Success {
+        user_id,
+        session_id,
+    } = login(pool.clone(), email.clone(), password).await?
+    {
+        Ok(CreateUserResult::Success {
+            user_id,
+            session_id,
+        })
     } else {
-        Err(warp::reject::custom(InternalError(anyhow::anyhow!("Failed to login after creating user"))))
+        internal_error(format!(
+            "Failed to login after creating user with email `{email}`"
+        ))
     }
 }
 
@@ -411,7 +433,8 @@ async fn login(
     )
     .fetch_optional(&pool)
     .await
-    .map_err(from_sqlx_error)?;
+    .with_context(|| format!("Failed to log in user with email `{email}`"))
+    .convert_error()?;
 
     match user {
         None => Ok(LoginResult::EmailNotFound),
@@ -431,7 +454,8 @@ async fn login(
             )
             .execute(&pool)
             .await
-            .map_err(from_sqlx_error)?;
+            .with_context(|| format!("Failed to create session for user with id {}", user.id))
+            .convert_error()?;
 
             Ok(LoginResult::Success {
                 user_id: user.id,
@@ -458,7 +482,9 @@ fn create_project_filter(
         .and(session())
         .and(with_db(pool))
         .and(warp::body::json())
-        .and_then(|session_id, pool, input: CreateProject| create_project(pool, session_id, input.name, input.data, input.is_private))
+        .and_then(|session_id, pool, input: CreateProject| {
+            create_project(pool, session_id, input.name, input.data, input.is_private)
+        })
 }
 
 async fn create_project(
@@ -479,9 +505,12 @@ async fn create_project(
         )
         .fetch_one(&pool)
         .await
-        .map_err(from_sqlx_error)?;
+        .with_context(|| format!("Failed to create project `{name}` for user with id {user_id}"))
+        .convert_error()?;
 
-    Ok(warp::reply::json(&serde_json::json!({ "project_id": row.id })))
+    Ok(warp::reply::json(
+        &serde_json::json!({ "project_id": row.id }),
+    ))
 }
 
 // GET /project/:project_id
@@ -528,7 +557,10 @@ async fn get_project(
     )
     .fetch_optional(&pool)
     .await
-    .map_err(from_sqlx_error)?;
+    .with_context(|| {
+        format!("Failed to get project with id {project_id} for user with id {user_id}")
+    })
+    .convert_error()?;
 
     let row = row.ok_or_else(warp::reject::not_found)?;
     Ok(row)
@@ -546,7 +578,10 @@ fn get_public_project_filter(
 }
 
 /// Get a public project.
-async fn get_public_project(project_id: i32, pool: sqlx::PgPool) -> Result<Project, warp::Rejection> {
+async fn get_public_project(
+    project_id: i32,
+    pool: sqlx::PgPool,
+) -> Result<Project, warp::Rejection> {
     let row = sqlx::query_as!(
         Project,
         r#"SELECT * FROM projects WHERE id = $1 AND is_private = false"#,
@@ -554,7 +589,8 @@ async fn get_public_project(project_id: i32, pool: sqlx::PgPool) -> Result<Proje
     )
     .fetch_optional(&pool)
     .await
-    .map_err(from_sqlx_error)?;
+    .with_context(|| format!("Failed to get public project with id {project_id}"))
+    .convert_error()?;
 
     let row = row.ok_or_else(warp::reject::not_found)?;
     Ok(row)

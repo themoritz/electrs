@@ -1,0 +1,42 @@
+@host = http://127.0.0.1:1337
+
+###
+
+# @prompt password
+POST {{host}}/api/user/create
+Content-Type: application/json
+
+{
+    "email": "mdrexl@fastmail.fm",
+    "password": "{{password}}"
+}
+
+###
+
+# @name login
+# @prompt password
+POST {{host}}/api/user/login
+Content-Type: application/json
+
+{
+    "email": "mdrexl",
+    "password": "{{password}}"
+}
+
+@session = {{login.response.body.session_id}}
+@user = {{login.response.body.user_id}}
+
+###
+
+GET {{host}}/api/project/2
+Session: {{session}}
+
+###
+
+GET {{host}}/api/project/public/3
+
+###
+
+@txid = 5bae7f1667e28d8148de300473db49229fac4d26abe7425293d1931afd5ed915
+
+GET {{host}}/api/tx/{{txid}}
