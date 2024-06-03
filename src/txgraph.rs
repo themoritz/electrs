@@ -63,7 +63,8 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .or(login_filter(pool.clone()))
             .or(create_project_filter(pool.clone()))
             .or(get_project_filter(pool.clone()))
-            .or(get_public_project_filter(pool.clone()));
+            .or(get_public_project_filter(pool.clone()))
+            .or(list_projects_filter(pool.clone()));
 
         let api = warp::path("api")
             .and(routes)
@@ -594,4 +595,41 @@ async fn get_public_project(
 
     let row = row.ok_or_else(warp::reject::not_found)?;
     Ok(row)
+}
+
+// GET projects
+
+fn list_projects_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("projects")
+        .and(warp::get())
+        .and(session())
+        .and(with_db(pool))
+        .and_then(list_projects)
+}
+
+async fn list_projects(
+    session_id: Uuid,
+    pool: sqlx::PgPool,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    #[derive(Serialize)]
+    struct ProjectEntry {
+        id: i32,
+        name: String,
+    }
+
+    let user_id = authenticate(&pool, session_id).await?;
+
+    let rows = sqlx::query_as!(
+        ProjectEntry,
+        r#"SELECT id, name FROM projects WHERE user_id = $1"#,
+        user_id
+    )
+    .fetch_all(&pool)
+    .await
+    .with_context(|| format!("Failed to list projects for user with id {user_id}"))
+    .convert_error()?;
+
+    Ok(warp::reply::json(&rows))
 }
