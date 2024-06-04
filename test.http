@@ -1,6 +1,6 @@
 @host = http://127.0.0.1:1337
 
-###
+### Create user
 
 # @prompt password
 POST {{host}}/api/user/create
@@ -11,7 +11,7 @@ Content-Type: application/json
     "password": "{{password}}"
 }
 
-###
+### Login
 
 # @name login
 # @prompt password
@@ -28,22 +28,32 @@ Content-Type: application/json
 @session = {{login.response.body.session_id}}
 @user = {{login.response.body.user_id}}
 
-###
+### Logout
 
-GET {{host}}/api/project/2
+POST {{host}}/api/user/logout
 Session: {{session}}
 
-###
+### Get project
+
+GET {{host}}/api/project/1
+Session: {{session}}
+
+### Get public project
 
 GET {{host}}/api/project/public/3
 
-###
+### Get Tx
 
 @txid = 5bae7f1667e28d8148de300473db49229fac4d26abe7425293d1931afd5ed915
 
 GET {{host}}/api/tx/{{txid}}
 
-###
+### List user's projects
 
 GET {{host}}/api/projects
+Session: {{session}}
+
+### Delete project
+
+DELETE {{host}}/api/project/4
 Session: {{session}}

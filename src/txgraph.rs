@@ -61,10 +61,12 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
         let routes = tx_get_filter(server_tx, stats)
             .or(create_user_filter(pool.clone()))
             .or(login_filter(pool.clone()))
+            .or(logout_filter(pool.clone()))
             .or(create_project_filter(pool.clone()))
             .or(get_project_filter(pool.clone()))
             .or(get_public_project_filter(pool.clone()))
-            .or(list_projects_filter(pool.clone()));
+            .or(list_projects_filter(pool.clone()))
+            .or(delete_project_filter(pool.clone()));
 
         let api = warp::path("api")
             .and(routes)
@@ -367,7 +369,7 @@ fn hash_password(password: &str, salt: &[u8]) -> Vec<u8> {
     hasher.finalize().as_slice().to_vec()
 }
 
-// /user/login
+// POST /user/login
 
 fn login_filter(
     pool: sqlx::PgPool,
@@ -463,6 +465,37 @@ async fn login(
                 session_id,
             })
         }
+    }
+}
+
+// POST /user/logout
+
+fn logout_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("user" / "logout")
+        .and(warp::post())
+        .and(session())
+        .and(with_db(pool))
+        .and_then(logout)
+}
+
+async fn logout(
+    session_id: Uuid,
+    pool: sqlx::PgPool,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let row = sqlx::query!(
+        r#"DELETE FROM sessions WHERE id = $1 RETURNING id"#,
+        session_id,
+    )
+    .fetch_optional(&pool)
+    .await
+    .with_context(|| format!("Failed to delete session with id {session_id}"))
+    .convert_error()?;
+
+    match row {
+        Some(_) => Ok(warp::reply::reply()),
+        None => Err(warp::reject::not_found()),
     }
 }
 
@@ -632,4 +665,41 @@ async fn list_projects(
     .convert_error()?;
 
     Ok(warp::reply::json(&rows))
+}
+
+// DELETE project/:project_id
+
+fn delete_project_filter(
+    pool: sqlx::PgPool,
+) -> impl warp::Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone {
+    warp::path!("project" / i32)
+        .and(warp::delete())
+        .and(session())
+        .and(with_db(pool))
+        .and_then(delete_project)
+}
+
+async fn delete_project(
+    project_id: i32,
+    session_id: Uuid,
+    pool: sqlx::PgPool,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let user_id = authenticate(&pool, session_id).await?;
+
+    let row = sqlx::query!(
+        r#"DELETE FROM projects WHERE id = $1 AND user_id = $2 RETURNING id"#,
+        project_id,
+        user_id
+    )
+    .fetch_optional(&pool)
+    .await
+    .with_context(|| {
+        format!("Failed to delete project with id {project_id} for user with id {user_id}")
+    })
+    .convert_error()?;
+
+    match row {
+        Some(_) => Ok(warp::reply::reply()),
+        None => Err(warp::reject::not_found()),
+    }
 }
