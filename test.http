@@ -7,7 +7,7 @@ POST {{host}}/api/user/create
 Content-Type: application/json
 
 {
-    "email": "mdrexl@fastmail.fm",
+    "email": "mdrexl2@fastmail.fm",
     "password": "{{password}}"
 }
 
@@ -19,7 +19,7 @@ POST {{host}}/api/user/login
 Content-Type: application/json
 
 {
-    "email": "mdrexl",
+    "email": "mdrexl2@fastmail.fm",
     "password": "{{password}}"
 }
 
@@ -32,6 +32,20 @@ Content-Type: application/json
 
 POST {{host}}/api/user/logout
 Session: {{session}}
+
+### Create project
+
+POST {{host}}/api/project/create
+Session: {{session}}
+Content-Type: application/json
+
+{
+    "name": "Test project",
+    "data": {
+        "foo": "bar"
+    },
+    "is_private": false
+}
 
 ### Get project
 
@@ -55,5 +69,5 @@ Session: {{session}}
 
 ### Delete project
 
-DELETE {{host}}/api/project/4
+DELETE {{host}}/api/project/6
 Session: {{session}}
