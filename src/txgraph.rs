@@ -3,7 +3,7 @@ use std::{fmt::Debug, net::SocketAddr, str::FromStr, time::Instant};
 use anyhow::{Context, Result};
 use axum::{
     extract::{FromRequestParts, Path, State},
-    http::{request, HeaderValue, StatusCode},
+    http::{request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -13,6 +13,7 @@ use sha2::Digest;
 use sqlx::types::Uuid;
 use tokio::{runtime::Runtime, task::spawn_blocking};
 use tower::ServiceBuilder;
+use tower_http::cors;
 
 use crate::{
     metrics::{self, Histogram, Metrics},
@@ -71,6 +72,12 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             server_tx,
         };
 
+        let cors = cors::CorsLayer::new()
+            .allow_methods(cors::Any)
+            .allow_origin(cors::Any)
+            .allow_headers(cors::Any);
+
+        // TODO: Add tracing middleware
         let app = Router::new()
             .route("/tx/:txid", get(tx_get))
             .route("/user/create", post(create_user))
@@ -81,7 +88,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/public/:project_id", get(get_public_project))
             .route("/projects", get(list_projects))
             .route("/project/:project_id", delete(delete_project))
-            .layer(ServiceBuilder::new().map_response(cors_allow_all))
+            .layer(ServiceBuilder::new().layer(cors))
             .with_state(state);
 
         let api = Router::new().nest("/api", app);
@@ -172,13 +179,6 @@ impl IntoResponse for AppError {
         };
         status_msg.into_response()
     }
-}
-
-fn cors_allow_all(mut response: Response) -> Response {
-    response
-        .headers_mut()
-        .insert("Access-Control-Allow-Origin", HeaderValue::from_static("*"));
-    response
 }
 
 /// Byte vector wrapper to deal with BYTEA Postgres type properly.
@@ -304,6 +304,7 @@ impl IntoResponse for CreateUserResult {
     }
 }
 
+// TODO: Write tests
 lazy_static::lazy_static! {
     static ref EMAIL_REGEX: regex::Regex = regex::Regex::new(
         r"(?x)
