@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS projects (
         REFERENCES users(id) ON DELETE CASCADE,
     name           TEXT NOT NULL,
     data           JSONB NOT NULL,
-    is_private     BOOLEAN NOT NULL DEFAULT TRUE,
+    is_public      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

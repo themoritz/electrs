@@ -87,6 +87,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/:project_id", get(get_project))
             .route("/project/public/:project_id", get(get_public_project))
             .route("/projects", get(list_projects))
+            .route("/project/:project_id/public", post(set_project_public))
             .route("/project/:project_id", delete(delete_project))
             .layer(ServiceBuilder::new().layer(cors))
             .with_state(state);
@@ -471,13 +472,13 @@ async fn login(
 async fn logout(
     AuthenticatedUser(user_id): AuthenticatedUser,
     State(state): State<AppState>,
-) -> Result<(), AppError> {
+) -> Result<Json<()>, AppError> {
     sqlx::query!(r#"DELETE FROM sessions WHERE user_id = $1"#, user_id,)
         .execute(&state.pool)
         .await
         .with_context(|| format!("Failed to delete sessions with for user with id {user_id}"))?;
 
-    Ok(())
+    Ok(Json(()))
 }
 
 // POST /project/create
@@ -486,7 +487,7 @@ async fn logout(
 struct CreateProject {
     name: String,
     data: serde_json::Value,
-    is_private: bool,
+    is_public: bool,
 }
 
 #[derive(Serialize)]
@@ -500,11 +501,11 @@ async fn create_project(
     Json(input): Json<CreateProject>,
 ) -> Result<Json<CreateProjectResult>, AppError> {
     let row = sqlx::query!(
-            r#"INSERT INTO projects (user_id, name, data, is_private) VALUES ($1, $2, $3, $4) RETURNING id"#,
+            r#"INSERT INTO projects (user_id, name, data, is_public) VALUES ($1, $2, $3, $4) RETURNING id"#,
             user_id,
             input.name,
             input.data,
-            input.is_private
+            input.is_public
         )
         .fetch_one(&state.pool)
         .await
@@ -521,7 +522,7 @@ struct Project {
     user_id: i32,
     name: String,
     data: serde_json::Value,
-    is_private: bool,
+    is_public: bool,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -556,7 +557,7 @@ async fn get_public_project(
 ) -> Result<Json<Project>, AppError> {
     let row = sqlx::query_as!(
         Project,
-        r#"SELECT * FROM projects WHERE id = $1 AND is_private = false"#,
+        r#"SELECT * FROM projects WHERE id = $1 AND is_public = false"#,
         project_id
     )
     .fetch_optional(&state.pool)
@@ -573,6 +574,8 @@ async fn get_public_project(
 struct ProjectEntry {
     id: i32,
     name: String,
+    is_public: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 async fn list_projects(
@@ -581,7 +584,7 @@ async fn list_projects(
 ) -> Result<Json<Vec<ProjectEntry>>, AppError> {
     let rows = sqlx::query_as!(
         ProjectEntry,
-        r#"SELECT id, name FROM projects WHERE user_id = $1"#,
+        r#"SELECT id, name, is_public, created_at FROM projects WHERE user_id = $1 ORDER BY created_at DESC"#,
         user_id
     )
     .fetch_all(&state.pool)
@@ -589,6 +592,32 @@ async fn list_projects(
     .with_context(|| format!("Failed to list projects for user with id {user_id}"))?;
 
     Ok(Json(rows))
+}
+
+// POST /project/:project_id/public
+
+async fn set_project_public(
+    State(state): State<AppState>,
+    Path(project_id): Path<i32>,
+    AuthenticatedUser(user_id): AuthenticatedUser,
+    Json(is_public): Json<bool>,
+) -> Result<Json<()>, AppError> {
+    let row = sqlx::query!(
+        r#"UPDATE projects SET is_public = $1 WHERE id = $2 AND user_id = $3 RETURNING id"#,
+        is_public,
+        project_id,
+        user_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .with_context(|| {
+        format!("Failed to set public flag of project with id {project_id} for user with id {user_id}")
+    })?;
+
+    match row {
+        Some(_) => Ok(Json(())),
+        None => Err(AppError::NotFound),
+    }
 }
 
 // DELETE /project/:project_id
