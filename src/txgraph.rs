@@ -88,6 +88,8 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/public/:project_id", get(get_public_project))
             .route("/projects", get(list_projects))
             .route("/project/:project_id/public", post(set_project_public))
+            .route("/project/:project_id/data", post(set_project_data))
+            .route("/project/:project_id/name", post(set_project_name))
             .route("/project/:project_id", delete(delete_project))
             .layer(ServiceBuilder::new().layer(cors))
             .with_state(state);
@@ -612,6 +614,58 @@ async fn set_project_public(
     .await
     .with_context(|| {
         format!("Failed to set public flag of project with id {project_id} for user with id {user_id}")
+    })?;
+
+    match row {
+        Some(_) => Ok(Json(())),
+        None => Err(AppError::NotFound),
+    }
+}
+
+// POST /project/:project_id/data
+
+async fn set_project_data(
+    State(state): State<AppState>,
+    Path(project_id): Path<i32>,
+    AuthenticatedUser(user_id): AuthenticatedUser,
+    Json(data): Json<serde_json::Value>,
+) -> Result<Json<()>, AppError> {
+    let row = sqlx::query!(
+        r#"UPDATE projects SET data = $1 WHERE id = $2 AND user_id = $3 RETURNING id"#,
+        data,
+        project_id,
+        user_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .with_context(|| {
+        format!("Failed to set data of project with id {project_id} for user with id {user_id}")
+    })?;
+
+    match row {
+        Some(_) => Ok(Json(())),
+        None => Err(AppError::NotFound),
+    }
+}
+
+// POST /project/:project_id/name
+
+async fn set_project_name(
+    State(state): State<AppState>,
+    Path(project_id): Path<i32>,
+    AuthenticatedUser(user_id): AuthenticatedUser,
+    Json(name): Json<String>,
+) -> Result<Json<()>, AppError> {
+    let row = sqlx::query!(
+        r#"UPDATE projects SET name = $1 WHERE id = $2 AND user_id = $3 RETURNING id"#,
+        name,
+        project_id,
+        user_id
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .with_context(|| {
+        format!("Failed to set name of project with id {project_id} for user with id {user_id}")
     })?;
 
     match row {

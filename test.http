@@ -49,7 +49,7 @@ Content-Type: application/json
 
 ### Get project
 
-GET {{host}}/api/project/1
+GET {{host}}/api/project/7
 Session: {{session}}
 
 ### Get public project
@@ -71,3 +71,29 @@ Session: {{session}}
 
 DELETE {{host}}/api/project/6
 Session: {{session}}
+
+### Set project public
+
+POST {{host}}/api/project/7/public
+Session: {{session}}
+Content-Type: application/json
+
+true
+
+### Save project
+
+POST {{host}}/api/project/7/data
+Session: {{session}}
+Content-Type: application/json
+
+{
+    "foo": "baz"
+}
+
+### Rename project
+
+POST {{host}}/api/project/7/name
+Session: {{session}}
+Content-Type: application/json
+
+"Kartoffel"
