@@ -1,4 +1,4 @@
-use std::{fmt::Debug, net::SocketAddr, str::FromStr, time::Instant};
+use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin, str::FromStr, time::{Duration, Instant}};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -11,8 +11,8 @@ use axum::{
 use crossbeam_channel::Sender;
 use sha2::Digest;
 use sqlx::types::Uuid;
-use tokio::{runtime::Runtime, task::spawn_blocking};
-use tower::ServiceBuilder;
+use tokio::{runtime::Runtime, task::spawn_blocking, time::sleep};
+use tower::{Layer, ServiceBuilder};
 use tower_http::cors;
 
 use crate::{
@@ -50,6 +50,52 @@ impl Stats {
                 "code", // 200 only
                 metrics::default_duration_buckets(),
             ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Sleep<T> {
+    inner: T,
+    duration: Duration,
+}
+
+impl<T, Request> tower::Service<Request> for Sleep<T>
+where
+    T: tower::Service<Request>,
+    T::Future: 'static + Send,
+{
+    type Response = T::Response;
+    type Error = T::Error;
+    type Future = Pin<Box<dyn Send + Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: Request) -> Self::Future {
+        let inner_fut = self.inner.call(request);
+        let duration = self.duration;
+        let f = async move {
+            sleep(duration).await;
+            inner_fut.await
+        };
+        Box::pin(f)
+    }
+}
+
+#[derive(Clone)]
+struct SleepLayer {
+    duration: Duration,
+}
+
+impl<S> Layer<S> for SleepLayer {
+    type Service = Sleep<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Sleep {
+            inner,
+            duration: self.duration,
         }
     }
 }
@@ -92,6 +138,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/:project_id/name", post(set_project_name))
             .route("/project/:project_id", delete(delete_project))
             .layer(ServiceBuilder::new().layer(cors))
+            // .layer(SleepLayer { duration: Duration::from_millis(200) })
             .with_state(state);
 
         let api = Router::new().nest("/api", app);

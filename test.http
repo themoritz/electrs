@@ -44,7 +44,7 @@ Content-Type: application/json
     "data": {
         "foo": "bar"
     },
-    "is_private": false
+    "is_public": false
 }
 
 ### Get project
@@ -69,7 +69,7 @@ Session: {{session}}
 
 ### Delete project
 
-DELETE {{host}}/api/project/6
+DELETE {{host}}/api/project/8
 Session: {{session}}
 
 ### Set project public
@@ -86,9 +86,7 @@ POST {{host}}/api/project/7/data
 Session: {{session}}
 Content-Type: application/json
 
-{
-    "foo": "baz"
-}
+{"annotations":{"coin_color":{},"coin_label":{},"tx_color":{},"tx_label":{}},"transactions":[{"position":{"x":740,"y":412},"txid":"196052f851ca34d0b2fe76adeea4712f9ae391d0540af36c97020f2da7c948c7"},{"position":{"x":788,"y":296},"txid":"2eb5907778df2c3701c066f4f5b6ad868c9caf20d9bba9ae7aec91cdb702e122"},{"position":{"x":735,"y":184},"txid":"9d0737b66b74f674547589b73575353b037cd82bade4608dfeb2dc8d0ee476ae"},{"position":{"x":610,"y":283},"txid":"ff90bfa21d9f9d2f47a3ae0fcb434d1d108399020e5e2e8b6ed239ecf019d174"},{"position":{"x":704,"y":71},"txid":"421aaa9af20e1a393d23ac255e34a24b463daa6bf99117de1ae137c86c6327bd"}],"version":0}
 
 ### Rename project
 
