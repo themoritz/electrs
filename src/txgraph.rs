@@ -108,7 +108,11 @@ pub struct Options {
 pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
-        let pool = sqlx::postgres::PgPool::connect("postgres://localhost/postgres").await?;
+        let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            log::warn!("DATABASE_URL not set, using default `postgres://localhost/postgres`");
+            "postgres://localhost/postgres".to_string()
+        });
+        let pool = sqlx::postgres::PgPool::connect(&db_url).await?;
 
         let stats = Stats::new(metrics);
 
