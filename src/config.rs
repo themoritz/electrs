@@ -313,7 +313,6 @@ impl Config {
             eprintln!("Error: please use `log_filters` to set logging verbosity",);
             std::process::exit(1);
         }
-        let log_filters = config.log_filters;
 
         let index_lookup_limit = match config.index_lookup_limit {
             0 => None,

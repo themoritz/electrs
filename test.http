@@ -61,6 +61,8 @@ GET {{host}}/api/project/public/3
 @txid = 5bae7f1667e28d8148de300473db49229fac4d26abe7425293d1931afd5ed915
 
 GET {{host}}/api/tx/{{txid}}
+X-Request-Signature: a1b2c3d4e5f6
+X-Forwarded-For: 127.0.0.1
 
 ### List user's projects
 

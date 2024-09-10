@@ -1,9 +1,18 @@
-use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc, time::{Duration, Instant}};
+use std::{
+    fmt::Debug,
+    future::Future,
+    net::SocketAddr,
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use axum::{
+    body::Body,
     extract::{FromRequestParts, Path, State},
-    http::{request, StatusCode},
+    http::{request, Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -13,7 +22,9 @@ use sha2::Digest;
 use sqlx::types::Uuid;
 use tokio::{runtime::Runtime, task::spawn_blocking, time::sleep};
 use tower::{Layer, ServiceBuilder};
-use tower_governor::{governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer};
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
+};
 use tower_http::{cors, trace::TraceLayer};
 
 use crate::{
@@ -70,7 +81,10 @@ where
     type Error = T::Error;
     type Future = Pin<Box<dyn Send + Future<Output = Result<Self::Response, Self::Error>>>>;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
@@ -142,11 +156,35 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .finish()
             .unwrap();
 
+        let trace_layer = TraceLayer::new_for_http()
+            .make_span_with(|request: &Request<Body>| {
+                tracing::info_span!(
+                    "request",
+                    method = %request.method(),
+                    uri = %request.uri()
+                )
+            })
+            .on_request(())
+            .on_response(
+                |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                    let status = response.status().as_u16();
+                    let latency = format!("{} ms", latency.as_millis());
+                    tracing::info!(
+                        target: "txgraph",
+                        %status,
+                        %latency,
+                        "done"
+                    );
+                },
+            );
+
         let user_routes = Router::new()
             .route("/create", post(create_user))
             .route("/login", post(login))
             .route("/logout", post(logout))
-            .layer(GovernorLayer { config: Arc::new(user_governor_conf) });
+            .layer(GovernorLayer {
+                config: Arc::new(user_governor_conf),
+            });
 
         let app = Router::new()
             .route("/tx/:txid", get(tx_get))
@@ -160,8 +198,10 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/:project_id/name", post(set_project_name))
             .route("/project/:project_id", delete(delete_project))
             .layer(ServiceBuilder::new().layer(cors))
-            .layer(GovernorLayer { config: Arc::new(governor_conf) })
-            .layer(TraceLayer::new_for_http())
+            .layer(GovernorLayer {
+                config: Arc::new(governor_conf),
+            })
+            .layer(trace_layer)
             // .layer(SleepLayer { duration: Duration::from_millis(200) })
             .with_state(state);
 
@@ -169,7 +209,11 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
 
         let listener = tokio::net::TcpListener::bind(options.address).await?;
         log::info!("Listening on http://{}", options.address);
-        axum::serve(listener, api.into_make_service_with_connect_info::<SocketAddr>()).await?;
+        axum::serve(
+            listener,
+            api.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await?;
 
         Ok(())
     })
@@ -368,7 +412,9 @@ impl<S> FromRequestParts<S> for RequestSignature {
             })?;
             Ok(Self(sig_bytes))
         } else {
-            Err(AppError::authentication_error("Missing request signature header"))
+            Err(AppError::authentication_error(
+                "Missing request signature header",
+            ))
         }
     }
 }
@@ -712,7 +758,9 @@ async fn set_project_public(
     .fetch_optional(&state.pool)
     .await
     .with_context(|| {
-        format!("Failed to set public flag of project with id {project_id} for user with id {user_id}")
+        format!(
+            "Failed to set public flag of project with id {project_id} for user with id {user_id}"
+        )
     })?;
 
     match row {
