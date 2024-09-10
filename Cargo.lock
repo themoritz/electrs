@@ -597,6 +597,7 @@ version = "0.10.4"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.13.1",
  "bitcoin",
  "bitcoin-test-data",
  "bitcoin_slices",
@@ -2148,9 +2149,9 @@ dependencies = [
 
 [[package]]
 name = "subtle"
-version = "2.5.0"
+version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"

@@ -283,6 +283,7 @@ async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32, AppE
 
 async fn tx_get(
     Path(txid): Path<String>,
+    RequestSignature(sig): RequestSignature,
     State(AppState {
         pool: _,
         server_tx,
@@ -297,6 +298,8 @@ async fn tx_get(
         Ok(txid) => txid,
         Err(err) => return Err(AppError::CantParseTxid(err)),
     };
+
+    check_request_signature(&txid, sig)?;
 
     spawn_blocking(move || server_tx.send(Event::get_tx(txid, sender))).await??;
 
@@ -327,6 +330,31 @@ async fn tx_get(
             Err(AppError::InternalError(err))
         }
     }
+}
+
+struct RequestSignature(Vec<u8>);
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for RequestSignature {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        if let Some(sig) = parts.headers.get("X-Request-Signature") {
+            let sig_bytes = base64::decode(sig.as_bytes()).map_err(|e| {
+                AppError::authentication_error(format!("Can't decode signature: {e}"))
+            })?;
+            Ok(Self(sig_bytes))
+        } else {
+            Err(AppError::authentication_error("Missing request signature header"))
+        }
+    }
+}
+
+fn check_request_signature(txid: &Txid, signature: Vec<u8>) -> Result<(), AppError> {
+    Ok(())
 }
 
 // POST /user/create
