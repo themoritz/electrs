@@ -2,6 +2,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::Network;
 use bitcoincore_rpc::Auth;
 use dirs_next::home_dir;
+use time::macros::format_description;
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -360,12 +361,18 @@ impl Config {
             "Starting electrs {} on {} {} with {:?}",
             ELECTRS_VERSION, ARCH, OS, config
         );
-        let mut builder = env_logger::Builder::from_default_env();
-        builder.default_format().format_timestamp_millis();
-        if let Some(log_filters) = &log_filters {
-            builder.parse_filters(log_filters);
-        }
-        builder.init();
+
+        tracing_log::LogTracer::init().unwrap();
+
+        let timer = tracing_subscriber::fmt::time::UtcTime::new(
+            format_description!("[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]")
+        );
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_timer(timer)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
 
         config
     }

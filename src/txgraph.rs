@@ -1,4 +1,4 @@
-use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin, str::FromStr, time::{Duration, Instant}};
+use std::{fmt::Debug, future::Future, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc, time::{Duration, Instant}};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -13,7 +13,8 @@ use sha2::Digest;
 use sqlx::types::Uuid;
 use tokio::{runtime::Runtime, task::spawn_blocking, time::sleep};
 use tower::{Layer, ServiceBuilder};
-use tower_http::cors;
+use tower_governor::{governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer};
+use tower_http::{cors, trace::TraceLayer};
 
 use crate::{
     metrics::{self, Histogram, Metrics},
@@ -127,12 +128,29 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .allow_origin(cors::Any)
             .allow_headers(cors::Any);
 
-        // TODO: Add tracing middleware
+        let governor_conf = GovernorConfigBuilder::default()
+            .per_second(10)
+            .burst_size(200)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .unwrap();
+
+        let user_governor_conf = GovernorConfigBuilder::default()
+            .per_second(4)
+            .burst_size(2)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .unwrap();
+
+        let user_routes = Router::new()
+            .route("/create", post(create_user))
+            .route("/login", post(login))
+            .route("/logout", post(logout))
+            .layer(GovernorLayer { config: Arc::new(user_governor_conf) });
+
         let app = Router::new()
             .route("/tx/:txid", get(tx_get))
-            .route("/user/create", post(create_user))
-            .route("/user/login", post(login))
-            .route("/user/logout", post(logout))
+            .nest("/user", user_routes)
             .route("/project/create", post(create_project))
             .route("/project/:project_id", get(get_project))
             .route("/project/public/:project_id", get(get_public_project))
@@ -142,6 +160,8 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .route("/project/:project_id/name", post(set_project_name))
             .route("/project/:project_id", delete(delete_project))
             .layer(ServiceBuilder::new().layer(cors))
+            .layer(GovernorLayer { config: Arc::new(governor_conf) })
+            .layer(TraceLayer::new_for_http())
             // .layer(SleepLayer { duration: Duration::from_millis(200) })
             .with_state(state);
 
@@ -149,7 +169,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
 
         let listener = tokio::net::TcpListener::bind(options.address).await?;
         log::info!("Listening on http://{}", options.address);
-        axum::serve(listener, api).await?;
+        axum::serve(listener, api.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
         Ok(())
     })
