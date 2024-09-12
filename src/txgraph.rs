@@ -143,7 +143,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             .allow_headers(cors::Any);
 
         let governor_conf = GovernorConfigBuilder::default()
-            .per_second(10)
+            .period(Duration::from_millis(10))
             .burst_size(200)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
