@@ -111,7 +111,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            log::warn!("DATABASE_URL not set, using default `postgres://localhost/postgres`");
+            tracing::warn!("DATABASE_URL not set, using default `postgres://localhost/postgres`");
             "postgres://localhost/postgres".to_string()
         });
         let pool = sqlx::postgres::PgPool::connect(&db_url).await?;
@@ -195,7 +195,7 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
         let api = Router::new().nest("/api", app);
 
         let listener = tokio::net::TcpListener::bind(options.address).await?;
-        log::info!("Listening on http://{}", options.address);
+        tracing::info!("Listening on http://{}", options.address);
         axum::serve(
             listener,
             api.into_make_service_with_connect_info::<SocketAddr>(),
@@ -269,7 +269,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status_msg = match self {
             Self::InternalError(err) => {
-                log::error!("Internal error: {}", err);
+                tracing::error!("Internal error: {}", err);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Internal error: {}", err),
@@ -368,14 +368,13 @@ async fn tx_get(
             stats
                 .response_duration
                 .txgraph_observe(&["404", &api_user], start.elapsed().as_secs_f64());
-            log::warn!("Txid not found: {}", txid);
             Err(AppError::NotFound)
         }
         Err(err) => {
             stats
                 .response_duration
                 .txgraph_observe(&["500", &api_user], start.elapsed().as_secs_f64());
-            log::error!("Internal error when handling tx {}: {:?}", txid, err);
+            tracing::error!("Internal error: {:?}", err);
             Err(AppError::InternalError(err))
         }
     }
