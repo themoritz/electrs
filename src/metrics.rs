@@ -66,6 +66,22 @@ mod metrics_impl {
             Histogram { hist }
         }
 
+        pub fn txgraph_histogram_vec(
+            &self,
+            name: &str,
+            desc: &str,
+            labels: &[&str],
+            buckets: Vec<f64>,
+        ) -> Histogram {
+            let name = String::from("txgraph_") + name;
+            let opts = HistogramOpts::new(name, desc).buckets(buckets);
+            let hist = HistogramVec::new(opts, labels).unwrap();
+            self.reg
+                .register(Box::new(hist.clone()))
+                .expect("failed to register Histogram");
+            Histogram { hist }
+        }
+
         pub fn gauge(&self, name: &str, desc: &str, label: &str) -> Gauge {
             let name = String::from("electrs_") + name;
             let opts = prometheus::Opts::new(name, desc);
@@ -96,6 +112,10 @@ mod metrics_impl {
     impl Histogram {
         pub fn observe(&self, label: &str, value: f64) {
             self.hist.with_label_values(&[label]).observe(value);
+        }
+
+        pub fn txgraph_observe(&self, labels: &[&str], value: f64) {
+            self.hist.with_label_values(labels).observe(value);
         }
 
         pub fn observe_duration<F, T>(&self, label: &str, func: F) -> T

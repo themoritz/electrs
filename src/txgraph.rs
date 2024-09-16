@@ -28,6 +28,7 @@ use tower_governor::{
 use tower_http::{cors, trace::TraceLayer};
 
 use crate::{
+    api_auth::ApiAuth,
     metrics::{self, Histogram, Metrics},
     server::Event,
 };
@@ -37,29 +38,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct Stats {
     response_duration: Histogram,
-    response_per_input_duration: Histogram,
-    response_per_output_duration: Histogram,
 }
 
 impl Stats {
     fn new(metrics: &Metrics) -> Self {
         Self {
-            response_duration: metrics.histogram_vec(
+            response_duration: metrics.txgraph_histogram_vec(
                 "response_duration",
                 "Tx response duration (in seconds)",
-                "code",
-                metrics::default_duration_buckets(),
-            ),
-            response_per_input_duration: metrics.histogram_vec(
-                "response_per_input_duration",
-                "Tx response duration per input (in seconds)",
-                "code", // 200 only
-                metrics::default_duration_buckets(),
-            ),
-            response_per_output_duration: metrics.histogram_vec(
-                "response_per_output_duration",
-                "Tx response duration per output (in seconds)",
-                "code", // 200 only
+                &["code", "client"],
                 metrics::default_duration_buckets(),
             ),
         }
@@ -170,10 +157,10 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
                     let status = response.status().as_u16();
                     let latency = format!("{} ms", latency.as_millis());
                     tracing::info!(
-                        target: "txgraph",
+                        target: "electrs::txgraph",
                         %status,
                         %latency,
-                        "done"
+                        "Done"
                     );
                 },
             );
@@ -256,7 +243,7 @@ struct AppState {
 
 // Error messages
 
-enum AppError {
+pub enum AppError {
     InternalError(anyhow::Error),
     AuthenticationError(String),
     NotFound,
@@ -264,7 +251,7 @@ enum AppError {
 }
 
 impl AppError {
-    fn authentication_error<E: ToString>(msg: E) -> Self {
+    pub fn authentication_error<E: ToString>(msg: E) -> Self {
         Self::AuthenticationError(msg.to_string())
     }
 }
@@ -347,7 +334,7 @@ async fn authenticate(pool: &sqlx::PgPool, session_id: Uuid) -> Result<i32, AppE
 
 async fn tx_get(
     Path(txid): Path<String>,
-    RequestSignature(sig): RequestSignature,
+    api_auth: ApiAuth,
     State(AppState {
         pool: _,
         server_tx,
@@ -363,64 +350,35 @@ async fn tx_get(
         Err(err) => return Err(AppError::CantParseTxid(err)),
     };
 
-    check_request_signature(&txid, sig)?;
+    let api_user = api_auth.authenticate(&txid)?;
+    let ip = api_auth.ip().unwrap_or_else(|| "unknown".to_string());
+    tracing::info!(%ip, %api_user, "Authenticated");
 
     spawn_blocking(move || server_tx.send(Event::get_tx(txid, sender))).await??;
 
     match receiver.await? {
         Ok(Some(tx)) => {
             let elapsed = start.elapsed().as_secs_f64();
-            stats.response_duration.observe("200", elapsed);
             stats
-                .response_per_input_duration
-                .observe("200", elapsed / tx.inputs.len() as f64);
-            stats
-                .response_per_output_duration
-                .observe("200", elapsed / tx.outputs.len() as f64);
+                .response_duration
+                .txgraph_observe(&["200", &api_user], elapsed);
             Ok(Json(tx))
         }
         Ok(None) => {
             stats
                 .response_duration
-                .observe("404", start.elapsed().as_secs_f64());
+                .txgraph_observe(&["404", &api_user], start.elapsed().as_secs_f64());
             log::warn!("Txid not found: {}", txid);
             Err(AppError::NotFound)
         }
         Err(err) => {
             stats
                 .response_duration
-                .observe("500", start.elapsed().as_secs_f64());
+                .txgraph_observe(&["500", &api_user], start.elapsed().as_secs_f64());
             log::error!("Internal error when handling tx {}: {:?}", txid, err);
             Err(AppError::InternalError(err))
         }
     }
-}
-
-struct RequestSignature(Vec<u8>);
-
-#[axum::async_trait]
-impl<S> FromRequestParts<S> for RequestSignature {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        if let Some(sig) = parts.headers.get("X-Request-Signature") {
-            let sig_bytes = base64::decode(sig.as_bytes()).map_err(|e| {
-                AppError::authentication_error(format!("Can't decode signature: {e}"))
-            })?;
-            Ok(Self(sig_bytes))
-        } else {
-            Err(AppError::authentication_error(
-                "Missing request signature header",
-            ))
-        }
-    }
-}
-
-fn check_request_signature(txid: &Txid, signature: Vec<u8>) -> Result<(), AppError> {
-    Ok(())
 }
 
 // POST /user/create

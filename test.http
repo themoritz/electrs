@@ -1,4 +1,5 @@
 @host = http://127.0.0.1:1337
+# @host = https://txgraph.info
 
 ### Create user
 
@@ -62,7 +63,8 @@ GET {{host}}/api/project/public/3
 
 GET {{host}}/api/tx/{{txid}}
 X-Request-Signature: a1b2c3d4e5f6
-X-Forwarded-For: 127.0.0.1
+X-Real-IP: 127.0.0.1
+Authorization: Bearer foo
 
 ### List user's projects
 

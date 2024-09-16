@@ -9,6 +9,7 @@ extern crate serde_derive;
 
 extern crate configure_me;
 
+mod api_auth;
 mod cache;
 mod txgraph;
 mod chain;
