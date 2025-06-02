@@ -1,0 +1,3 @@
+[submodule "txgraph"]
+	path = txgraph
+	url = https://github.com/themoritz/txgraph

@@ -13,4 +13,3 @@ data/
 tests/bitcoin-*
 tests/bin
 .idea/
-*.json

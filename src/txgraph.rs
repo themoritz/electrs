@@ -14,7 +14,7 @@ use axum::{
     extract::{FromRequestParts, Path, State},
     http::{request, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, get_service, post},
     Json, Router,
 };
 use crossbeam_channel::Sender;
@@ -25,6 +25,7 @@ use tower::{Layer, ServiceBuilder};
 use tower_governor::{
     governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
 };
+use tower_http::services::ServeDir;
 use tower_http::{cors, trace::TraceLayer};
 
 use crate::{
@@ -192,7 +193,9 @@ pub fn main(server_tx: Sender<Event>, metrics: &Metrics, options: Options) -> Re
             // .layer(SleepLayer { duration: Duration::from_millis(200) })
             .with_state(state);
 
-        let api = Router::new().nest("/api", app);
+        let api = Router::new()
+            .route_service("/", get_service(ServeDir::new("./dist")))
+            .nest("/api", app);
 
         let listener = tokio::net::TcpListener::bind(options.address).await?;
         tracing::info!("Listening on http://{}", options.address);

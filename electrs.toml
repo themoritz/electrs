@@ -1,0 +1,8 @@
+daemon_rpc_addr = "127.0.0.1:8332"
+daemon_p2p_addr = "127.0.0.1:8333"
+db_dir = "/home/bitcoin/.bitcoin/electrs"
+daemon_dir = "/home/bitcoin/.bitcoin"
+network = "bitcoin"
+electrum_rpc_addr = "0.0.0.0:8080"
+disable_electrum_rpc = true
+log_filters = "INFO"
